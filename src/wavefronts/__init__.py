@@ -24,6 +24,8 @@ turbulence shares the loop, the mode basis, and the residual interface.
 The distribution name is a working placeholder and may change before release.
 """
 
+from wavefronts.speckle import TabulatedSpeckleField
+
 __version__ = "0.0.1"
 
-__all__ = ["__version__"]
+__all__ = ["TabulatedSpeckleField", "__version__"]
