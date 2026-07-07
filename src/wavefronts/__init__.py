@@ -24,8 +24,14 @@ turbulence shares the loop, the mode basis, and the residual interface.
 The distribution name is a working placeholder and may change before release.
 """
 
+from wavefronts.control import close_dark_hole
 from wavefronts.speckle import TabulatedSpeckleField, correlated_drift_field
 
 __version__ = "0.0.1"
 
-__all__ = ["TabulatedSpeckleField", "__version__", "correlated_drift_field"]
+__all__ = [
+    "TabulatedSpeckleField",
+    "__version__",
+    "close_dark_hole",
+    "correlated_drift_field",
+]
