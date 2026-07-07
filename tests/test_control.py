@@ -7,25 +7,31 @@ import pytest
 from physicaloptix import (
     Field,
     Fraunhofer,
+    Fresnel,
     Grid,
     ModeBasis,
     OpticalPath,
     PhaseScreen,
     PlaneKind,
+    Spectrum,
     Stage,
+    broadcast_to_spectrum,
 )
 
 from wavefronts.control import close_dark_hole
 
 WL = 500.0
 _KS = [(3, 1), (3, 0), (3, 2), (2, 1), (4, 1), (3, -1)]
+# A richer symmetric set around the (3, 0) speckle for the two-DM demonstration.
+_RELAY_KS = [(3, 0), (3, 1), (3, -1), (2, 0), (4, 0), (2, 1), (4, 1), (3, 2), (3, -2)]
+DIAM_M = 0.02
 
 
-def _fourier_dm(npix, amp_nm=5.0):
+def _fourier_dm(npix, amp_nm=5.0, freqs=None):
     x = np.asarray(Grid.pupil(npix).coords)
     x_grid, y_grid = np.meshgrid(x, x)
     modes = []
-    for kx, ky in _KS:
+    for kx, ky in freqs or _KS:
         arg = 2 * np.pi * (kx * x_grid + ky * y_grid)
         modes.append(amp_nm * np.cos(arg))
         modes.append(amp_nm * np.sin(arg))
@@ -53,6 +59,115 @@ def _setup(npix=16):
     # A small one-sided dark zone around the aberration's speckle at (3, 1) lambda/D.
     mask = (np.abs(fx_grid - 3.0) < 0.4) & (np.abs(fy_grid - 1.0) < 0.4)
     return path, field, jnp.asarray(mask)
+
+
+def _relay_setup(npix=16, alpha=0.0556):
+    """A two-DM relay with an AMPLITUDE aberration: a real focal speckle a pupil
+    phase DM cannot null (wrong quadrature), but two DMs can via Talbot amplitude.
+
+    ``alpha`` is set near the Talbot peak for the (3, 0) speckle (pi alpha 3^2
+    approximately pi/2), so the out-of-pupil DM has strong amplitude authority.
+    """
+    pupil = Grid.pupil(npix)
+    focal = Grid.focal(32, 0.5)
+    x = np.asarray(pupil.coords)
+    x_grid, y_grid = np.meshgrid(x, x)
+    aperture = (x_grid**2 + y_grid**2 <= 0.25).astype(float)
+    amplitude_ripple = 1.0 + 0.15 * np.cos(2 * np.pi * 3 * x_grid)  # (3, 0) speckle
+    e_in = (aperture * amplitude_ripple).astype(complex)
+    field = Field(data=jnp.asarray(e_in), grid=pupil, plane=PlaneKind.PUPIL)
+    z = alpha * DIAM_M**2 / (WL * 1e-9)
+
+    def fresnel(distance_m, plane_in, plane_out):
+        return Fresnel(
+            grid=pupil,
+            distance_m=distance_m,
+            beam_diameter_m=DIAM_M,
+            wavelength_nm=WL,
+            plane_in=plane_in,
+            plane_out=plane_out,
+            on_undersampled="record",
+        )
+
+    dm_basis = _fourier_dm(npix, freqs=_RELAY_KS)
+    path = OpticalPath(
+        stages=(
+            Stage("dm1", PhaseScreen(dm_basis, pupil, wavelength_nm=WL)),
+            Stage("relay", fresnel(z, PlaneKind.PUPIL, PlaneKind.INTERMEDIATE)),
+            Stage(
+                "dm2",
+                PhaseScreen(
+                    dm_basis, pupil, wavelength_nm=WL, plane=PlaneKind.INTERMEDIATE
+                ),
+            ),
+            Stage("relay_back", fresnel(-z, PlaneKind.INTERMEDIATE, PlaneKind.PUPIL)),
+            Stage("science", Fraunhofer(grid_in=pupil, grid_out=focal)),
+        )
+    )
+    fx = np.asarray(focal.coords)
+    fx_grid, fy_grid = np.meshgrid(fx, fx)
+    # A TWO-SIDED zone: a pupil phase DM cannot null a real symmetric speckle at
+    # both +3 and -3 at once (its modes are imaginary-symmetric or real-anti-
+    # symmetric); the out-of-pupil DM supplies the missing real-symmetric quadrature.
+    both_sides = (np.abs(fx_grid - 3.0) < 0.6) | (np.abs(fx_grid + 3.0) < 0.6)
+    mask = both_sides & (np.abs(fy_grid) < 0.6)
+    return path, field, jnp.asarray(mask)
+
+
+class TestTwoDeformableMirrors:
+    def test_command_spans_both_mirrors(self):
+        path, field, mask = _relay_setup()
+        command, _ = close_dark_hole(
+            path, field, (0, 2), mask, n_steps=2, gain=0.3, regularization=1e-4
+        )
+        n_each = path.stages[0].op.basis.n_modes
+        assert command.shape == (2 * n_each,)
+
+    def test_two_dm_nulls_amplitude_that_one_dm_cannot(self):
+        """A single pupil phase DM cannot null the two-sided real-symmetric
+        amplitude speckle (its modes are imaginary-symmetric or real-anti-
+        symmetric), so it floors near the initial contrast; the out-of-pupil
+        second DM supplies the missing real-symmetric quadrature, so two DMs dig
+        far deeper."""
+        path, field, mask = _relay_setup()
+        _, hist_two = close_dark_hole(
+            path, field, (0, 2), mask, n_steps=60, gain=0.5, regularization=1e-7
+        )
+        _, hist_one = close_dark_hole(
+            path, field, (0,), mask, n_steps=60, gain=0.5, regularization=1e-7
+        )
+        assert hist_one[-1] > 0.3 * hist_one[0]  # one DM cannot null it
+        assert hist_two[-1] < 1e-6 * hist_two[0]  # two DMs reach a deep null
+        assert hist_two[-1] < 1e-3 * hist_one[-1]  # decisively deeper
+
+    def test_is_differentiable_in_gain(self):
+        path, field, mask = _relay_setup()
+
+        def final_contrast(gain):
+            _, history = close_dark_hole(
+                path, field, (0, 2), mask, n_steps=6, gain=gain, regularization=1e-6
+            )
+            return history[-1]
+
+        grad = jax.grad(final_contrast)(0.5)
+        assert jnp.isfinite(grad)
+
+    def test_two_dm_digs_a_broadband_dark_hole(self):
+        """A chromatic input field digs a broadband hole: the dark-zone response
+        is stacked over wavelengths. A single DM (chromatic phase only) floors on
+        the band-averaged amplitude speckle; two DMs reduce it, though a
+        limited-DOF broadband null floors above the monochromatic case."""
+        path, mono, mask = _relay_setup()
+        field = broadcast_to_spectrum(mono, Spectrum.tophat(WL, 0.15, 3))
+        _, hist_two = close_dark_hole(
+            path, field, (0, 2), mask, n_steps=60, gain=0.5, regularization=1e-7
+        )
+        _, hist_one = close_dark_hole(
+            path, field, (0,), mask, n_steps=60, gain=0.5, regularization=1e-7
+        )
+        assert hist_one[-1] > 0.8 * hist_one[0]  # one DM cannot null it broadband
+        assert hist_two[-1] < 0.6 * hist_two[0]  # two DMs reduce the band contrast
+        assert hist_two[-1] < 0.6 * hist_one[-1]  # the broadband two-DM advantage
 
 
 class TestCloseDarkHole:
