@@ -3,6 +3,7 @@
 import jax
 import jax.numpy as jnp
 import numpy as np
+import pytest
 from physicaloptix import (
     Field,
     Fraunhofer,
@@ -56,11 +57,37 @@ def _setup(npix=16):
 
 class TestCloseDarkHole:
     def test_reduces_dark_zone_intensity(self):
+        """Best case: the aberration lies in the DM span and the null is
+        underdetermined (fewer masked pixels than modes), so the loop reaches a
+        deep null. A real dark hole floors at the out-of-DM-span residual."""
         path, field, mask = _setup()
         _, history = close_dark_hole(
             path, field, 0, mask, n_steps=20, gain=0.5, regularization=1e-6
         )
-        assert history[-1] < 1e-3 * history[0]  # deep null within the dark zone
+        assert history[-1] < 1e-3 * history[0]
+
+    def test_rejects_empty_dark_zone(self):
+        path, field, _ = _setup()
+        empty = jnp.zeros((32, 32), dtype=bool)
+        with pytest.raises(ValueError, match="dark_zone"):
+            close_dark_hole(
+                path, field, 0, empty, n_steps=3, gain=0.5, regularization=1e-6
+            )
+
+    def test_rejects_non_deformable_mirror_stage(self):
+        path, field, mask = _setup()
+        with pytest.raises(TypeError, match="PhaseScreen"):
+            # stage 1 is the Fraunhofer, not a deformable mirror.
+            close_dark_hole(
+                path, field, 1, mask, n_steps=3, gain=0.5, regularization=1e-6
+            )
+
+    def test_rejects_nonpositive_regularization(self):
+        path, field, mask = _setup()
+        with pytest.raises(ValueError, match="regularization"):
+            close_dark_hole(
+                path, field, 0, mask, n_steps=3, gain=0.5, regularization=0.0
+            )
 
     def test_is_differentiable_in_gain(self):
         path, field, mask = _setup()
