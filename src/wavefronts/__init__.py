@@ -26,6 +26,7 @@ The distribution name is a working placeholder and may change before release.
 
 from wavefronts.control import close_dark_hole
 from wavefronts.speckle import TabulatedSpeckleField, correlated_drift_field
+from wavefronts.turbulence import frozen_flow_sequence, von_karman_screen
 
 __version__ = "0.0.1"
 
@@ -34,4 +35,6 @@ __all__ = [
     "__version__",
     "close_dark_hole",
     "correlated_drift_field",
+    "frozen_flow_sequence",
+    "von_karman_screen",
 ]
