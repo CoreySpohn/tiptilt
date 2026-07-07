@@ -6,7 +6,11 @@ import numpy as np
 import pytest
 from optixstuff.speckle import AbstractSpeckleField
 
-from wavefronts.speckle import TabulatedSpeckleField
+from wavefronts.speckle import (
+    TabulatedSpeckleField,
+    _draw_correlated_spectrum,
+    correlated_drift_field,
+)
 
 
 @pytest.fixture
@@ -78,6 +82,141 @@ class TestTabulatedSpeckleField:
             return jnp.sum(field.realize(wavelength_nm=500.0, time_s=t))
 
         assert jnp.isfinite(jax.grad(total)(7.0))
+
+
+def _synthetic_lin(seed=2, m=2, ny=3, nx=3):
+    rng = np.random.default_rng(seed)
+    g = rng.standard_normal((m, ny, nx)) + 1j * rng.standard_normal((m, ny, nx))
+    e = rng.standard_normal((ny, nx)) + 1j * rng.standard_normal((ny, nx))
+    return jnp.asarray(e), jnp.asarray(g)
+
+
+def _ensemble_cov(covariance, weights, n_samples):
+    def eps0(key):
+        amplitudes, phases = _draw_correlated_spectrum(covariance, key, weights)
+        return jnp.sum(amplitudes * jnp.cos(phases), axis=1)
+
+    keys = jax.random.split(jax.random.PRNGKey(7), n_samples)
+    samples = np.asarray(jax.vmap(eps0)(keys))
+    return np.cov(samples.T)
+
+
+class TestCorrelatedDriftField:
+    def test_returns_an_analytic_speckle_field(self):
+        e_nom, g = _synthetic_lin()
+        covariance = jnp.asarray([[4.0, 1.0], [1.0, 9.0]])
+        freqs = jnp.linspace(1e-4, 1e-2, 16)
+        psd = jnp.ones(16)
+        field = correlated_drift_field(
+            e_nom,
+            g,
+            covariance,
+            key=jax.random.PRNGKey(0),
+            frequencies_hz=freqs,
+            psd=psd,
+            normalization=1.0,
+        )
+        from physicaloptix import AnalyticSpeckleField
+
+        assert isinstance(field, AnalyticSpeckleField)
+        assert field.amplitudes.shape == (2, 16)
+        assert field.frequencies_hz.shape == (16,)
+
+    def test_recovers_the_target_covariance(self):
+        covariance = jnp.asarray([[4.0, 1.5], [1.5, 9.0]])
+        weights = 2.0 * jnp.ones(32) / 32.0
+        cov = _ensemble_cov(covariance, weights, 8000)
+        np.testing.assert_allclose(cov, np.asarray(covariance), atol=0.4)
+
+    def test_is_deterministic_given_a_key(self):
+        e_nom, g = _synthetic_lin()
+        covariance = jnp.asarray([[4.0, 1.0], [1.0, 9.0]])
+        freqs = jnp.linspace(1e-4, 1e-2, 16)
+        psd = jnp.ones(16)
+        args = (e_nom, g, covariance)
+        kw = dict(
+            key=jax.random.PRNGKey(3),
+            frequencies_hz=freqs,
+            psd=psd,
+            normalization=1.0,
+        )
+        first = correlated_drift_field(*args, **kw)
+        second = correlated_drift_field(*args, **kw)
+        np.testing.assert_array_equal(
+            np.asarray(first.amplitudes), np.asarray(second.amplitudes)
+        )
+
+    def test_rank_deficient_covariance_is_handled(self):
+        """A singular (rank-1) covariance must not crash and is still
+        recovered -- this is why the draw uses an eigendecomposition, not a
+        Cholesky factorization."""
+        v = jnp.asarray([1.0, 2.0])
+        covariance = jnp.outer(v, v)  # rank-1 PSD, singular
+        weights = 2.0 * jnp.ones(32) / 32.0
+        cov = _ensemble_cov(covariance, weights, 8000)
+        np.testing.assert_allclose(cov, np.asarray(covariance), atol=0.4)
+
+    def _builder_kwargs(self, psd):
+        e_nom, g = _synthetic_lin()
+        return e_nom, g, jnp.asarray([[4.0, 1.0], [1.0, 9.0]]), psd
+
+    def test_rejects_zero_total_psd(self):
+        e_nom, g, cov, psd = self._builder_kwargs(jnp.zeros(8))
+        with pytest.raises(ValueError, match="psd"):
+            correlated_drift_field(
+                e_nom,
+                g,
+                cov,
+                key=jax.random.PRNGKey(0),
+                frequencies_hz=jnp.linspace(1e-4, 1e-2, 8),
+                psd=psd,
+                normalization=1.0,
+            )
+
+    def test_rejects_indefinite_covariance(self):
+        e_nom, g = _synthetic_lin()
+        indefinite = jnp.asarray([[1.0, 2.0], [2.0, 1.0]])  # eigenvalues -1, 3
+        with pytest.raises(ValueError, match="semidefinite"):
+            correlated_drift_field(
+                e_nom,
+                g,
+                indefinite,
+                key=jax.random.PRNGKey(0),
+                frequencies_hz=jnp.linspace(1e-4, 1e-2, 8),
+                psd=jnp.ones(8),
+                normalization=1.0,
+            )
+
+    def test_rejects_asymmetric_covariance(self):
+        e_nom, g = _synthetic_lin()
+        asymmetric = jnp.asarray([[4.0, 1.0], [0.5, 9.0]])
+        with pytest.raises(ValueError, match="symmetric"):
+            correlated_drift_field(
+                e_nom,
+                g,
+                asymmetric,
+                key=jax.random.PRNGKey(0),
+                frequencies_hz=jnp.linspace(1e-4, 1e-2, 8),
+                psd=jnp.ones(8),
+                normalization=1.0,
+            )
+
+    def test_warns_when_neff_is_low(self):
+        """A steeply red PSD concentrates power in one frequency, so a single
+        realization is unrepresentative: the builder warns."""
+        e_nom, g, cov, red = self._builder_kwargs(
+            jnp.asarray([1.0, 1e-3, 1e-3, 1e-3, 1e-3, 1e-3, 1e-3, 1e-3])
+        )
+        with pytest.warns(UserWarning, match="N_eff"):
+            correlated_drift_field(
+                e_nom,
+                g,
+                cov,
+                key=jax.random.PRNGKey(0),
+                frequencies_hz=jnp.linspace(1e-4, 1e-2, 8),
+                psd=red,
+                normalization=1.0,
+            )
 
 
 class TestPhysicaloptixIntegration:
