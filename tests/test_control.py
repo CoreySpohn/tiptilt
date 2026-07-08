@@ -16,9 +16,11 @@ from physicaloptix import (
     Spectrum,
     Stage,
     broadcast_to_spectrum,
+    fourier_dm_basis,
 )
 
 from wavefronts.control import close_dark_hole
+from wavefronts.sensing import probe_set
 
 WL = 500.0
 _KS = [(3, 1), (3, 0), (3, 2), (2, 1), (4, 1), (3, -1)]
@@ -215,3 +217,73 @@ class TestCloseDarkHole:
 
         grad = jax.grad(final_contrast)(0.5)
         assert jnp.isfinite(grad)
+
+
+def _estimated_setup(npix=32, nfoc=64, pscale=0.25):
+    """A pupil -> Fourier-DM -> focal path with a phase aberration and a
+    one-sided (single-DM-nullable) dark zone, plus its unaberrated model."""
+    pupil = Grid.pupil(npix)
+    focal = Grid.focal(nfoc, pscale)
+    coords = np.asarray(pupil.coords)
+    xg, yg = np.meshgrid(coords, coords)
+    aperture = (xg**2 + yg**2 <= 0.25).astype(complex)
+    dm = fourier_dm_basis(pupil, n_actuators=16, k_min=2.0, k_max=7.0)
+    path = OpticalPath(
+        stages=(
+            Stage("dm", PhaseScreen(dm, pupil, wavelength_nm=WL)),
+            Stage("sci", Fraunhofer(grid_in=pupil, grid_out=focal)),
+        )
+    )
+    opd = 4.0 * np.cos(2 * np.pi * 4 * xg) + 3.0 * np.cos(2 * np.pi * 5 * xg + 0.7)
+    input_field = Field(
+        data=jnp.asarray(aperture * np.exp(1j * 2 * np.pi * opd / WL)),
+        grid=pupil,
+        plane=PlaneKind.PUPIL,
+    )
+    model_field = Field(data=jnp.asarray(aperture), grid=pupil, plane=PlaneKind.PUPIL)
+    fx = np.asarray(focal.coords)
+    fxg, fyg = np.meshgrid(fx, fx)
+    r = np.hypot(fxg, fyg)
+    mask = jnp.asarray((r >= 2.0) & (r <= 7.0) & (fxg > 1.0))  # one-sided D-shape
+    return path, dm, input_field, model_field, mask
+
+
+class TestEstimatedLoop:
+    def test_pairwise_loop_digs_with_an_honest_model(self):
+        path, dm, input_field, model_field, mask = _estimated_setup()
+        probes = probe_set(dm, amplitude_nm=2.0, n_probes=4)
+        _, history = close_dark_hole(
+            path, input_field, 0, mask, n_steps=20, gain=0.4, regularization=1e-6,
+            estimator="pairwise", model_field=model_field, probes=probes,
+        )
+        # Digs about an order of magnitude; depth floors on the model mismatch
+        # (the probe response is modelled without the unknown aberration).
+        assert float(history[-1]) < 0.2 * float(history[0])
+
+    def test_oracle_still_digs_deeper_than_estimated(self):
+        path, dm, input_field, model_field, mask = _estimated_setup()
+        probes = probe_set(dm, amplitude_nm=2.0, n_probes=4)
+        _, oracle = close_dark_hole(
+            path, input_field, 0, mask, n_steps=20, gain=0.4, regularization=1e-6,
+        )
+        _, est = close_dark_hole(
+            path, input_field, 0, mask, n_steps=20, gain=0.4, regularization=1e-6,
+            estimator="pairwise", model_field=model_field, probes=probes,
+        )
+        assert float(oracle[-1]) < float(est[-1])  # perfect knowledge digs deeper
+
+    def test_pairwise_requires_probes(self):
+        path, _dm, input_field, model_field, mask = _estimated_setup()
+        with pytest.raises(ValueError, match="probes"):
+            close_dark_hole(
+                path, input_field, 0, mask, n_steps=3, gain=0.4,
+                regularization=1e-6, estimator="pairwise", model_field=model_field,
+            )
+
+    def test_rejects_unknown_estimator(self):
+        path, _dm, input_field, _model_field, mask = _estimated_setup()
+        with pytest.raises(ValueError, match="estimator"):
+            close_dark_hole(
+                path, input_field, 0, mask, n_steps=3, gain=0.4,
+                regularization=1e-6, estimator="bogus",
+            )

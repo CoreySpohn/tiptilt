@@ -107,7 +107,7 @@ def estimate_field_pairwise(
         Complex field estimate over the masked pixels, shape ``(n_dark,)``.
     """
     if command is None:
-        command = jnp.zeros(path.stages[dm_index].op.basis.coeffs.shape)
+        command = path.stages[dm_index].op.basis.coeffs  # probe around current state
     if model_field is None:
         model_field = input_field
     keys = (
