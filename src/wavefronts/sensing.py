@@ -167,3 +167,81 @@ def pairwise_estimate(probe_fields, diff_images, *, regularization=0.0):
     reg = regularization * jnp.eye(2)
     x = jnp.linalg.solve(gram + reg, rhs)[..., 0]  # (n_pixels, 2)
     return x[:, 0] + 1j * x[:, 1]
+
+
+class KalmanFieldEstimator(eqx.Module):
+    """Recursive pairwise-probe field estimator (one probe pair per iteration).
+
+    The batch estimator needs a full probe set every iteration because it keeps
+    no memory. A Kalman filter carries the field estimate and its covariance
+    forward through the control history, so the rank the batch needed all at
+    once is instead accumulated over time and a single probe pair per iteration
+    suffices (Groff 2016). The per-pixel state is ``[Re E; Im E]`` with a 2x2
+    covariance; ``update`` runs a predict step (an optional known field change
+    from the last deformable-mirror command, plus process noise) and a
+    measurement update from one probe pair.
+
+    Attributes:
+        state: Per-pixel ``[Re E; Im E]``, shape ``(n_pixels, 2)``.
+        covariance: Per-pixel error covariance, shape ``(n_pixels, 2, 2)``.
+        process_noise: Scalar process-noise variance (drift between steps).
+        measurement_noise: Scalar measurement-noise variance (detector).
+    """
+
+    state: jax.Array
+    covariance: jax.Array
+    process_noise: float = eqx.field(static=True)
+    measurement_noise: float = eqx.field(static=True)
+
+    @classmethod
+    def init(cls, n_pixels, *, initial_variance, process_noise, measurement_noise):
+        """A diffuse prior: zero field, ``initial_variance`` on each quadrature."""
+        return cls(
+            state=jnp.zeros((n_pixels, 2)),
+            covariance=jnp.tile(initial_variance * jnp.eye(2), (n_pixels, 1, 1)),
+            process_noise=process_noise,
+            measurement_noise=measurement_noise,
+        )
+
+    @property
+    def field(self):
+        """The current complex field estimate, shape ``(n_pixels,)``."""
+        return self.state[:, 0] + 1j * self.state[:, 1]
+
+    def update(self, probe_field, diff_image, *, field_change=None):
+        """One predict-and-update step from a single probe pair.
+
+        Args:
+            probe_field: The probe's model field, shape ``(n_pixels,)`` complex.
+            diff_image: The measured difference ``I_+ - I_-``, shape
+                ``(n_pixels,)``.
+            field_change: Known field change since the last step (the applied
+                deformable-mirror delta propagated to the focal plane); defaults
+                to none.
+
+        Returns:
+            A new ``KalmanFieldEstimator`` with the updated state and covariance.
+        """
+        n_pixels = self.state.shape[0]
+        if field_change is None:
+            shift = jnp.zeros((n_pixels, 2))
+        else:
+            shift = jnp.stack([jnp.real(field_change), jnp.imag(field_change)], axis=-1)
+        x_pred = self.state + shift
+        p_pred = self.covariance + self.process_noise * jnp.eye(2)
+
+        # Measurement: z = H x + noise, H = 4 [Re p, Im p] (one row per pixel).
+        h = 4.0 * jnp.stack([jnp.real(probe_field), jnp.imag(probe_field)], axis=-1)
+        h = h[:, jnp.newaxis, :]  # (n_pixels, 1, 2)
+        z = diff_image[:, jnp.newaxis]  # (n_pixels, 1)
+
+        ph_t = jnp.einsum("kij,klj->kil", p_pred, h)  # (n_pixels, 2, 1)
+        s = jnp.einsum("kij,kjl->kil", h, ph_t) + self.measurement_noise  # (k,1,1)
+        gain = ph_t / s  # (n_pixels, 2, 1)
+        innovation = z - jnp.einsum("kij,kj->ki", h, x_pred)  # (n_pixels, 1)
+        x_new = x_pred + gain[..., 0] * innovation  # (n_pixels, 2)
+        kh = jnp.einsum("kil,klj->kij", gain, h)  # (n_pixels, 2, 2)
+        p_new = jnp.einsum("kij,kjl->kil", jnp.eye(2) - kh, p_pred)
+        return eqx.tree_at(
+            lambda e: (e.state, e.covariance), self, (x_new, p_new)
+        )

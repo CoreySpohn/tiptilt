@@ -16,6 +16,7 @@ from physicaloptix import (
 from physicaloptix.stats import dark_zone_mask
 
 from wavefronts.sensing import (
+    KalmanFieldEstimator,
     estimate_field_pairwise,
     pairwise_estimate,
     probe_set,
@@ -87,6 +88,75 @@ class TestPairwiseEstimate:
         e_hat = pairwise_estimate(probe_fields, z)
         assert e_hat.shape == (n_pix,)
         assert jnp.iscomplexobj(e_hat)
+
+
+class TestKalmanEstimator:
+    def _trace(self, est):
+        return float(jnp.sum(jnp.trace(est.covariance, axis1=1, axis2=2)))
+
+    def test_two_independent_updates_recover_the_field(self):
+        n_pix = 5
+        e_true = jnp.full(n_pix, 1e-4 + 0.7e-4j)
+        p1 = jnp.full(n_pix, 1e-3 + 0j)
+        p2 = jnp.full(n_pix, 0 + 1e-3j)
+        est = KalmanFieldEstimator.init(
+            n_pix, initial_variance=1.0, process_noise=0.0, measurement_noise=1e-16
+        )
+        est = est.update(p1, _linear_diff_images(e_true, p1[None])[0])
+        est = est.update(p2, _linear_diff_images(e_true, p2[None])[0])
+        np.testing.assert_allclose(
+            np.asarray(est.field), np.asarray(e_true), rtol=1e-5, atol=1e-10
+        )
+
+    def test_matches_batch_after_seeing_the_same_probes(self):
+        n_pix = 6
+        kr, ki = jax.random.split(jax.random.PRNGKey(3))
+        e_true = 1e-4 * (
+            jax.random.normal(kr, (n_pix,)) + 1j * jax.random.normal(ki, (n_pix,))
+        )
+        p1 = 1e-3 * (1 + 0.3j) * jnp.ones(n_pix)
+        p2 = 1e-3 * (0.2 + 1j) * jnp.ones(n_pix)
+        probes = jnp.stack([p1, p2])
+        diffs = _linear_diff_images(e_true, probes)
+        batch = pairwise_estimate(probes, diffs)
+        est = KalmanFieldEstimator.init(
+            n_pix, initial_variance=1e3, process_noise=0.0, measurement_noise=1e-14
+        )
+        est = est.update(p1, diffs[0]).update(p2, diffs[1])
+        np.testing.assert_allclose(
+            np.asarray(est.field), np.asarray(batch), rtol=1e-4, atol=1e-10
+        )
+
+    def test_one_update_is_partial_two_is_complete(self):
+        n_pix = 4
+        e_true = jnp.full(n_pix, 1e-4 + 1e-4j)
+        p_real = jnp.full(n_pix, 1e-3 + 0j)
+        p_imag = jnp.full(n_pix, 0 + 1e-3j)
+        est = KalmanFieldEstimator.init(
+            n_pix, initial_variance=1.0, process_noise=0.0, measurement_noise=1e-14
+        )
+        est1 = est.update(p_real, _linear_diff_images(e_true, p_real[None])[0])
+        err1 = float(jnp.max(jnp.abs(est1.field - e_true)))
+        est2 = est1.update(p_imag, _linear_diff_images(e_true, p_imag[None])[0])
+        err2 = float(jnp.max(jnp.abs(est2.field - e_true)))
+        assert err2 < err1  # the second, independent probe completes the estimate
+        assert err2 < 1e-8
+
+    def test_covariance_shrinks_with_each_update(self):
+        n_pix = 4
+        e_true = jnp.full(n_pix, 1e-4 + 1e-4j)
+        p1 = jnp.full(n_pix, 1e-3 + 0j)
+        p2 = jnp.full(n_pix, 0 + 1e-3j)
+        est = KalmanFieldEstimator.init(
+            n_pix, initial_variance=1.0, process_noise=0.0, measurement_noise=1e-12
+        )
+        tr0 = self._trace(est)
+        est = est.update(p1, _linear_diff_images(e_true, p1[None])[0])
+        tr1 = self._trace(est)
+        est = est.update(p2, _linear_diff_images(e_true, p2[None])[0])
+        tr2 = self._trace(est)
+        assert tr1 < tr0
+        assert tr2 < tr1
 
 
 class TestEstimateFieldThroughPath:
