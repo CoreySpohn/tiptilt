@@ -30,6 +30,8 @@ from wavefronts.sensing import (
     estimate_field_pairwise,
     pairwise_estimate,
     probe_set,
+    zwfs_calibrate,
+    zwfs_reconstruct,
 )
 from wavefronts.speckle import TabulatedSpeckleField, correlated_drift_field
 from wavefronts.turbulence import frozen_flow_sequence, von_karman_screen
@@ -47,4 +49,6 @@ __all__ = [
     "pairwise_estimate",
     "probe_set",
     "von_karman_screen",
+    "zwfs_calibrate",
+    "zwfs_reconstruct",
 ]

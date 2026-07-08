@@ -13,6 +13,7 @@ real system cannot take.
 import equinox as eqx
 import jax
 import jax.numpy as jnp
+from physicaloptix import Field, PlaneKind
 
 
 def probe_set(basis, *, amplitude_nm, n_probes=3, seed=0):
@@ -271,3 +272,63 @@ class KalmanFieldEstimator(eqx.Module):
         return eqx.tree_at(
             lambda e: (e.state, e.covariance), self, (x_new, p_new)
         )
+
+
+def zwfs_calibrate(sensor, aperture_field, mode_basis, *, wavelength_nm):
+    """Reference image and per-mode interaction matrix of a Zernike WFS.
+
+    Linearizes the sensor image about the flat wavefront: pushes each mode of
+    ``mode_basis`` through ``sensor`` (via ``jax.jacfwd``) and stacks the
+    intensity response, so the low-order phase is recovered by inverting the
+    interaction matrix. This is the standard low-order-WFS calibration.
+
+    Args:
+        sensor: A ``ZernikeWavefrontSensor``.
+        aperture_field: The flat (unaberrated) pupil field.
+        mode_basis: The low-order ``ModeBasis`` to sense (drop piston).
+        wavelength_nm: Wavelength for the OPD-to-phase conversion.
+
+    Returns:
+        ``(reference_image, interaction)``: the flat-wavefront sensor image and
+        the ``(n_pixels, n_modes)`` intensity response matrix.
+    """
+    modes = mode_basis.B
+    n_modes = modes.shape[0]
+    aperture = aperture_field.data
+    grid = aperture_field.grid
+    spectrum = aperture_field.spectrum
+
+    def image_of(coeffs):
+        opd = jnp.tensordot(coeffs, modes, axes=1)
+        field = Field(
+            data=aperture * jnp.exp(1j * 2.0 * jnp.pi * opd / wavelength_nm),
+            grid=grid,
+            plane=PlaneKind.PUPIL,
+            spectrum=spectrum,
+        )
+        return jnp.abs(sensor(field).data) ** 2
+
+    reference = image_of(jnp.zeros(n_modes))
+    jac = jax.jacfwd(image_of)(jnp.zeros(n_modes))  # (npix, npix, n_modes)
+    return reference, jac.reshape(-1, n_modes)
+
+
+def zwfs_reconstruct(image, reference, interaction, *, regularization=0.0):
+    """Least-squares low-order coefficients from a Zernike-WFS image.
+
+    Inverts the calibrated interaction matrix: solves
+    ``(Z^T Z + reg I) c = Z^T (image - reference)`` for the mode coefficients.
+
+    Args:
+        image: The measured sensor image.
+        reference: The flat-wavefront reference image from :func:`zwfs_calibrate`.
+        interaction: The ``(n_pixels, n_modes)`` interaction matrix.
+        regularization: Non-negative Tikhonov term for the inverse.
+
+    Returns:
+        The reconstructed mode coefficients, shape ``(n_modes,)``.
+    """
+    diff = (image - reference).reshape(-1)
+    n_modes = interaction.shape[1]
+    gram = interaction.T @ interaction + regularization * jnp.eye(n_modes)
+    return jnp.linalg.solve(gram, interaction.T @ diff)
