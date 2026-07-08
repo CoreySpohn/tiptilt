@@ -64,6 +64,39 @@ def _focal_field(path, field, dm_index, command):
     return out.data
 
 
+def probe_measurement(
+    path, input_field, model_field, dm_index, probe, dark_zone_mask, *,
+    detector=None, key=None,
+):
+    """One probe's model field and measured difference image over a dark zone.
+
+    Applies the probe as a positive and negative deformable-mirror pair around
+    the deformable mirror's current command, reads the two focal images off the
+    true ``input_field`` (optionally through ``detector``), and computes the
+    symmetric model probe field ``(f(+) - f(-))/2`` from ``model_field``. The
+    symmetric form cancels the even (quadratic) deformable-mirror nonlinearity,
+    matching the symmetric difference image.
+
+    Returns:
+        ``(probe_field, diff_image)``: complex model field and real ``I_+ - I_-``,
+        both flattened over ``dark_zone_mask``.
+    """
+    command = path.stages[dm_index].op.basis.coeffs
+    e_plus = _focal_field(path, input_field, dm_index, command + probe)
+    e_minus = _focal_field(path, input_field, dm_index, command - probe)
+    i_plus = jnp.abs(e_plus) ** 2
+    i_minus = jnp.abs(e_minus) ** 2
+    if detector is not None:
+        key_plus, key_minus = jax.random.split(key)
+        i_plus = detector(i_plus, key_plus)
+        i_minus = detector(i_minus, key_minus)
+    diff = (i_plus - i_minus)[dark_zone_mask]
+    model_plus = _focal_field(path, model_field, dm_index, command + probe)
+    model_minus = _focal_field(path, model_field, dm_index, command - probe)
+    probe_field = 0.5 * (model_plus - model_minus)[dark_zone_mask]
+    return probe_field, diff
+
+
 def estimate_field_pairwise(
     path,
     input_field,
@@ -106,31 +139,24 @@ def estimate_field_pairwise(
     Returns:
         Complex field estimate over the masked pixels, shape ``(n_dark,)``.
     """
-    if command is None:
-        command = path.stages[dm_index].op.basis.coeffs  # probe around current state
+    if command is not None:
+        path = _with_command(path, dm_index, command)  # probe around this command
     if model_field is None:
         model_field = input_field
     keys = (
-        jax.random.split(key, 2 * len(probes))
+        list(jax.random.split(key, len(probes)))
         if detector is not None
-        else [None] * (2 * len(probes))
+        else [None] * len(probes)
     )
 
     probe_fields, diff_images = [], []
-    for j, probe in enumerate(probes):
-        e_plus = _focal_field(path, input_field, dm_index, command + probe)
-        e_minus = _focal_field(path, input_field, dm_index, command - probe)
-        i_plus = jnp.abs(e_plus) ** 2
-        i_minus = jnp.abs(e_minus) ** 2
-        if detector is not None:
-            i_plus = detector(i_plus, keys[2 * j])
-            i_minus = detector(i_minus, keys[2 * j + 1])
-        diff_images.append((i_plus - i_minus)[dark_zone_mask])
-        # Symmetric probe field (f(+) - f(-))/2 cancels the even (quadratic)
-        # deformable-mirror nonlinearity, matching the symmetric difference image.
-        model_plus = _focal_field(path, model_field, dm_index, command + probe)
-        model_minus = _focal_field(path, model_field, dm_index, command - probe)
-        probe_fields.append(0.5 * (model_plus - model_minus)[dark_zone_mask])
+    for probe, probe_key in zip(probes, keys, strict=True):
+        probe_field, diff = probe_measurement(
+            path, input_field, model_field, dm_index, probe, dark_zone_mask,
+            detector=detector, key=probe_key,
+        )
+        probe_fields.append(probe_field)
+        diff_images.append(diff)
 
     return pairwise_estimate(
         jnp.stack(probe_fields), jnp.stack(diff_images), regularization=regularization

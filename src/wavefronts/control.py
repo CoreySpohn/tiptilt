@@ -5,7 +5,11 @@ import jax
 import jax.numpy as jnp
 from physicaloptix import PhaseScreen
 
-from wavefronts.sensing import estimate_field_pairwise
+from wavefronts.sensing import (
+    KalmanFieldEstimator,
+    estimate_field_pairwise,
+    probe_measurement,
+)
 
 
 def _dm_coeffs(path, dm_index):
@@ -116,25 +120,24 @@ def close_dark_hole(
     mask = jnp.asarray(dark_zone_mask)
     if not bool(jnp.any(mask)):
         raise ValueError("dark_zone_mask selects no pixels")
-    if estimator not in ("oracle", "pairwise"):
+    if estimator not in ("oracle", "pairwise", "kalman"):
         raise ValueError(
-            f"estimator must be 'oracle' or 'pairwise', got {estimator!r}"
+            f"estimator must be 'oracle', 'pairwise', or 'kalman', got {estimator!r}"
         )
-    if estimator == "pairwise":
+    estimated = estimator in ("pairwise", "kalman")
+    if estimated:
         if probes is None:
-            raise ValueError("estimator='pairwise' requires probes")
+            raise ValueError(f"estimator={estimator!r} requires probes")
         if input_field.spectrum is not None:
             raise NotImplementedError(
-                "broadband pairwise estimation is not yet supported"
+                "broadband estimated control is not yet supported"
             )
         if probe_dm is None:
             probe_dm = indices[0]
     # The control Jacobian is known from the model; the honest estimated loop
     # builds it on the unaberrated model field, not the (unknown) true field.
     jacobian_field = (
-        model_field
-        if (estimator == "pairwise" and model_field is not None)
-        else input_field
+        model_field if (estimated and model_field is not None) else input_field
     )
 
     mode_counts = [path.stages[i].op.basis.n_modes for i in indices]
@@ -213,6 +216,42 @@ def close_dark_hole(
                 regularization=regularization,
             )
             residual = jnp.concatenate([jnp.real(e_hat), jnp.imag(e_hat)])
+            command = command - gain * (control_matrix @ residual)
+        return command, jnp.stack(history)
+
+    if estimator == "kalman":
+        # One probe pair per step; the filter accumulates rank over time,
+        # predicting with the known field change from the applied DM delta
+        # (g_dz @ delta) and correcting from a single measurement.
+        keys = (
+            list(jax.random.split(key, n_steps))
+            if key is not None
+            else [None] * n_steps
+        )
+        model = input_field if model_field is None else model_field
+        # Heuristic hyperparameters for a near-noiseless model: trust the
+        # measurements (small R) but keep a little process noise so the filter
+        # stays responsive to the residual model error as the hole digs.
+        kalman = KalmanFieldEstimator.init(
+            int(jnp.sum(mask)),
+            initial_variance=1.0,
+            process_noise=1e-12,
+            measurement_noise=1e-16,
+        )
+        command = jnp.zeros(n_total)
+        last_command = jnp.zeros(n_total)
+        history = []
+        for i in range(n_steps):
+            history.append(contrast(focal_field(command)))
+            field_change = g_dz @ (command - last_command)
+            probe = probes[i % len(probes)]
+            probe_field, diff = probe_measurement(
+                set_commands(command), input_field, model, probe_dm, probe, mask,
+                detector=detector, key=keys[i],
+            )
+            kalman = kalman.update(probe_field, diff, field_change=field_change)
+            residual = jnp.concatenate([jnp.real(kalman.field), jnp.imag(kalman.field)])
+            last_command = command
             command = command - gain * (control_matrix @ residual)
         return command, jnp.stack(history)
 

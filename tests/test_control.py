@@ -260,6 +260,15 @@ class TestEstimatedLoop:
         # (the probe response is modelled without the unknown aberration).
         assert float(history[-1]) < 0.2 * float(history[0])
 
+    def test_kalman_loop_digs_with_one_probe_per_step(self):
+        path, dm, input_field, model_field, mask = _estimated_setup()
+        probes = probe_set(dm, amplitude_nm=2.0, n_probes=2)
+        _, history = close_dark_hole(
+            path, input_field, 0, mask, n_steps=30, gain=0.4, regularization=1e-6,
+            estimator="kalman", model_field=model_field, probes=probes,
+        )
+        assert float(history[-1]) < 0.2 * float(history[0])
+
     def test_oracle_still_digs_deeper_than_estimated(self):
         path, dm, input_field, model_field, mask = _estimated_setup()
         probes = probe_set(dm, amplitude_nm=2.0, n_probes=4)
