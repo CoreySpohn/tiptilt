@@ -25,6 +25,11 @@ The distribution name is a working placeholder and may change before release.
 """
 
 from wavefronts.control import close_dark_hole
+from wavefronts.sensing import (
+    estimate_field_pairwise,
+    pairwise_estimate,
+    probe_set,
+)
 from wavefronts.speckle import TabulatedSpeckleField, correlated_drift_field
 from wavefronts.turbulence import frozen_flow_sequence, von_karman_screen
 
@@ -35,6 +40,9 @@ __all__ = [
     "__version__",
     "close_dark_hole",
     "correlated_drift_field",
+    "estimate_field_pairwise",
     "frozen_flow_sequence",
+    "pairwise_estimate",
+    "probe_set",
     "von_karman_screen",
 ]
