@@ -32,6 +32,14 @@ dependencies = [
 dev = ["pre-commit"]
 test = ["pytest", "hypothesis", "pytest-cov"]
 
+[tool.pytest.ini_options]
+# Loop-convergence (physics regression) tests dominate the suite; run the
+# suite parallel by default and keep a fast unit loop via -m "not slow".
+addopts = "-n auto"
+markers = [
+    "slow: multi-step control-loop convergence (physics regression, seconds each)",
+]
+
 [tool.ruff.lint]
 select = ["B", "D", "E", "F", "I", "UP", "RUF"]
 
@@ -43,3 +51,8 @@ convention = "google"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/wavefronts"]
+
+[dependency-groups]
+dev = [
+    "pytest-xdist>=3.8.0",
+]

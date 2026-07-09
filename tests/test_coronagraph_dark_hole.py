@@ -9,6 +9,7 @@ recovered from probe images).
 
 import jax.numpy as jnp
 import numpy as np
+import pytest
 from physicaloptix import (
     Field,
     Fraunhofer,
@@ -81,6 +82,7 @@ def _vortex_path():
 
 
 class TestCoronagraphDarkHole:
+    @pytest.mark.slow
     def test_oracle_digs_a_real_dark_hole_in_the_vortex(self):
         path, _dm, input_field, _model_field, mask = _vortex_path()
         _, history = close_dark_hole(
@@ -89,12 +91,21 @@ class TestCoronagraphDarkHole:
         # Perfect knowledge carves the region deep: orders of magnitude.
         assert float(history[-1]) < 1e-3 * float(history[0])
 
+    @pytest.mark.slow
     def test_estimated_loop_digs_a_real_dark_hole_in_the_vortex(self):
         path, dm, input_field, model_field, mask = _vortex_path()
         probes = probe_set(dm, amplitude_nm=2.0, n_probes=4)
         _, history = close_dark_hole(
-            path, input_field, 0, mask, n_steps=18, gain=0.4, regularization=1e-6,
-            estimator="pairwise", model_field=model_field, probes=probes,
+            path,
+            input_field,
+            0,
+            mask,
+            n_steps=18,
+            gain=0.4,
+            regularization=1e-6,
+            estimator="pairwise",
+            model_field=model_field,
+            probes=probes,
         )
         # The honest loop digs a real hole; depth floors on the model mismatch.
         assert float(history[-1]) < 0.1 * float(history[0])

@@ -212,15 +212,24 @@ class TestEstimateFieldThroughPath:
         def mean_error(flux):
             def detector(image, key):
                 counts = read_detector(
-                    image / peak, key, flux=flux, exposure_time=1.0,
-                    read_noise_e=0.0, method="poisson",
+                    image / peak,
+                    key,
+                    flux=flux,
+                    exposure_time=1.0,
+                    read_noise_e=0.0,
+                    method="poisson",
                 )
                 return peak * counts / flux  # unbiased, back to image units
 
             errs = []
             for s in range(8):
                 e_hat = estimate_field_pairwise(
-                    path, input_field, 0, probes, mask, key=jax.random.PRNGKey(s),
+                    path,
+                    input_field,
+                    0,
+                    probes,
+                    mask,
+                    key=jax.random.PRNGKey(s),
                     detector=detector,
                 )
                 errs.append(float(jnp.max(jnp.abs(e_hat - e_true))))

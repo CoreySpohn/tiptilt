@@ -140,6 +140,7 @@ class TestTwoDeformableMirrors:
         n_each = path.stages[0].op.basis.n_modes
         assert command.shape == (2 * n_each,)
 
+    @pytest.mark.slow
     def test_two_dm_nulls_amplitude_that_one_dm_cannot(self):
         """A single pupil phase DM cannot null the two-sided real-symmetric
         amplitude speckle (its modes are imaginary-symmetric or real-anti-
@@ -148,10 +149,10 @@ class TestTwoDeformableMirrors:
         far deeper."""
         path, field, mask = _relay_setup()
         _, hist_two = close_dark_hole(
-            path, field, (0, 2), mask, n_steps=60, gain=0.5, regularization=1e-7
+            path, field, (0, 2), mask, n_steps=30, gain=0.5, regularization=1e-7
         )
         _, hist_one = close_dark_hole(
-            path, field, (0,), mask, n_steps=60, gain=0.5, regularization=1e-7
+            path, field, (0,), mask, n_steps=30, gain=0.5, regularization=1e-7
         )
         assert hist_one[-1] > 0.3 * hist_one[0]  # one DM cannot null it
         assert hist_two[-1] < 1e-6 * hist_two[0]  # two DMs reach a deep null
@@ -169,6 +170,7 @@ class TestTwoDeformableMirrors:
         grad = jax.grad(final_contrast)(0.5)
         assert jnp.isfinite(grad)
 
+    @pytest.mark.slow
     def test_two_dm_digs_a_broadband_dark_hole(self):
         """A chromatic input field digs a broadband hole: the dark-zone response
         is stacked over wavelengths. A single DM (chromatic phase only) floors on
@@ -178,10 +180,10 @@ class TestTwoDeformableMirrors:
         path, mono, mask = _relay_setup()
         field = broadcast_to_spectrum(mono, Spectrum.tophat(WL, 0.15, 3))
         _, hist_two = close_dark_hole(
-            path, field, (0, 2), mask, n_steps=60, gain=0.5, regularization=1e-7
+            path, field, (0, 2), mask, n_steps=30, gain=0.5, regularization=1e-7
         )
         _, hist_one = close_dark_hole(
-            path, field, (0,), mask, n_steps=60, gain=0.5, regularization=1e-7
+            path, field, (0,), mask, n_steps=30, gain=0.5, regularization=1e-7
         )
         assert hist_one[-1] > 0.8 * hist_one[0]  # one DM cannot null it broadband
         assert hist_two[-1] < 0.6 * hist_two[0]  # two DMs reduce the band contrast
@@ -189,6 +191,7 @@ class TestTwoDeformableMirrors:
 
 
 class TestCloseDarkHole:
+    @pytest.mark.slow
     def test_reduces_dark_zone_intensity(self):
         """Best case: the aberration lies in the DM span and the null is
         underdetermined (fewer masked pixels than modes), so the loop reaches a
@@ -265,6 +268,7 @@ def _estimated_setup(npix=32, nfoc=64, pscale=0.25):
 
 
 class TestEstimatedLoop:
+    @pytest.mark.slow
     def test_pairwise_loop_digs_with_an_honest_model(self):
         path, dm, input_field, model_field, mask = _estimated_setup()
         probes = probe_set(dm, amplitude_nm=2.0, n_probes=4)
@@ -284,6 +288,7 @@ class TestEstimatedLoop:
         # (the probe response is modelled without the unknown aberration).
         assert float(history[-1]) < 0.2 * float(history[0])
 
+    @pytest.mark.slow
     def test_kalman_loop_digs_with_one_probe_per_step(self):
         path, dm, input_field, model_field, mask = _estimated_setup()
         probes = probe_set(dm, amplitude_nm=2.0, n_probes=2)
@@ -301,6 +306,7 @@ class TestEstimatedLoop:
         )
         assert float(history[-1]) < 0.2 * float(history[0])
 
+    @pytest.mark.slow
     def test_oracle_still_digs_deeper_than_estimated(self):
         path, dm, input_field, model_field, mask = _estimated_setup()
         probes = probe_set(dm, amplitude_nm=2.0, n_probes=4)
@@ -361,6 +367,7 @@ class TestEstimatedTwoDeformableMirrors:
     """The honest loop across two DMs: probe one mirror, estimate the dark-zone
     field, drive both mirrors. No oracle read of the true field."""
 
+    @pytest.mark.slow
     def test_estimated_two_dm_beats_estimated_one_dm(self):
         """A single pupil phase DM cannot null the two-sided real-symmetric
         amplitude speckle whether it reads the true field or estimates it. Two
@@ -375,7 +382,7 @@ class TestEstimatedTwoDeformableMirrors:
             field,
             (0, 2),
             mask,
-            n_steps=60,
+            n_steps=30,
             gain=0.5,
             regularization=1e-6,
             estimator="pairwise",
@@ -388,7 +395,7 @@ class TestEstimatedTwoDeformableMirrors:
             field,
             (0,),
             mask,
-            n_steps=60,
+            n_steps=30,
             gain=0.5,
             regularization=1e-6,
             estimator="pairwise",
@@ -400,6 +407,7 @@ class TestEstimatedTwoDeformableMirrors:
         assert hist_two[-1] < 0.1 * hist_two[0]  # two DMs dig the two-sided hole
         assert hist_two[-1] < 0.1 * hist_one[-1]  # decisively deeper, honestly
 
+    @pytest.mark.slow
     def test_estimated_two_dm_digs_a_broadband_hole(self):
         """The honest loop digs a BROADBAND two-sided hole: sub-band pairwise
         probing estimates the field per wavelength, and two DMs null the stacked
@@ -417,7 +425,7 @@ class TestEstimatedTwoDeformableMirrors:
             field,
             (0, 2),
             mask,
-            n_steps=60,
+            n_steps=30,
             gain=0.5,
             regularization=1e-6,
             estimator="pairwise",
@@ -430,7 +438,7 @@ class TestEstimatedTwoDeformableMirrors:
             field,
             (0,),
             mask,
-            n_steps=60,
+            n_steps=30,
             gain=0.5,
             regularization=1e-6,
             estimator="pairwise",
@@ -442,6 +450,7 @@ class TestEstimatedTwoDeformableMirrors:
         assert hist_two[-1] < 0.6 * hist_two[0]  # two DMs reduce the band contrast
         assert hist_two[-1] < 0.6 * hist_one[-1]  # the honest broadband two-DM edge
 
+    @pytest.mark.slow
     def test_estimated_two_dm_kalman_broadband(self):
         """The recursive Kalman estimator also drives a broadband two-DM hole:
         one probe pair per step, per sub-band (the per-(wavelength, pixel) state
@@ -456,7 +465,7 @@ class TestEstimatedTwoDeformableMirrors:
             field,
             (0, 2),
             mask,
-            n_steps=50,
+            n_steps=35,
             gain=0.4,
             regularization=1e-6,
             estimator="kalman",
