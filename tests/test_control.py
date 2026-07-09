@@ -172,8 +172,9 @@ class TestTwoDeformableMirrors:
     def test_two_dm_digs_a_broadband_dark_hole(self):
         """A chromatic input field digs a broadband hole: the dark-zone response
         is stacked over wavelengths. A single DM (chromatic phase only) floors on
-        the band-averaged amplitude speckle; two DMs reduce it, though a
-        limited-DOF broadband null floors above the monochromatic case."""
+        the band-averaged amplitude speckle; two DMs reduce it, though the
+        chromatic broadband null floors above the monochromatic case (the
+        contrast-vs-bandwidth tradeoff, not a DOF or sensing limit)."""
         path, mono, mask = _relay_setup()
         field = broadcast_to_spectrum(mono, Spectrum.tophat(WL, 0.15, 3))
         _, hist_two = close_dark_hole(
@@ -403,8 +404,9 @@ class TestEstimatedTwoDeformableMirrors:
         """The honest loop digs a BROADBAND two-sided hole: sub-band pairwise
         probing estimates the field per wavelength, and two DMs null the stacked
         per-wavelength response. A single chromatic phase DM floors on the band-
-        averaged amplitude speckle; two DMs reduce the band contrast to a
-        degrees-of-freedom-limited broadband floor, all from probe images."""
+        averaged amplitude speckle; two DMs reduce the band contrast to a broadband
+        floor set by the CHROMATIC tax (monochromatically the same mirrors dig far
+        deeper; the oracle hits the same floor), all from probe images."""
         path, dm_basis, mono, model_mono, mask = _relay_estimated_setup()
         spectrum = Spectrum.tophat(WL, 0.15, 3)
         field = broadcast_to_spectrum(mono, spectrum)
