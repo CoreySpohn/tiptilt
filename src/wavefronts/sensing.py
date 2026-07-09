@@ -54,9 +54,7 @@ def probe_set(basis, *, amplitude_nm, n_probes=3, seed=0):
 
 def _with_command(path, dm_index, command):
     """A copy of ``path`` with deformable-mirror ``dm_index`` set to ``command``."""
-    return eqx.tree_at(
-        lambda p: p.stages[dm_index].op.basis.coeffs, path, command
-    )
+    return eqx.tree_at(lambda p: p.stages[dm_index].op.basis.coeffs, path, command)
 
 
 def _focal_field(path, field, dm_index, command):
@@ -65,9 +63,24 @@ def _focal_field(path, field, dm_index, command):
     return out.data
 
 
+def _mask_dark_zone(data, mask):
+    """Flatten a focal array over the dark zone, chromatic-stack aware.
+
+    ``(ny, nx) -> (n_dark,)`` and ``(nlam, ny, nx) -> (nlam, n_dark)``.
+    """
+    return data[mask] if data.ndim == 2 else data[:, mask]
+
+
 def probe_measurement(
-    path, input_field, model_field, dm_index, probe, dark_zone_mask, *,
-    detector=None, key=None,
+    path,
+    input_field,
+    model_field,
+    dm_index,
+    probe,
+    dark_zone_mask,
+    *,
+    detector=None,
+    key=None,
 ):
     """One probe's model field and measured difference image over a dark zone.
 
@@ -80,7 +93,8 @@ def probe_measurement(
 
     Returns:
         ``(probe_field, diff_image)``: complex model field and real ``I_+ - I_-``,
-        both flattened over ``dark_zone_mask``.
+        both flattened over ``dark_zone_mask`` to ``(n_dark,)``, or ``(nlam,
+        n_dark)`` for a chromatic field (one row per wavelength / sub-band).
     """
     command = path.stages[dm_index].op.basis.coeffs
     e_plus = _focal_field(path, input_field, dm_index, command + probe)
@@ -91,10 +105,10 @@ def probe_measurement(
         key_plus, key_minus = jax.random.split(key)
         i_plus = detector(i_plus, key_plus)
         i_minus = detector(i_minus, key_minus)
-    diff = (i_plus - i_minus)[dark_zone_mask]
+    diff = _mask_dark_zone(i_plus - i_minus, dark_zone_mask)
     model_plus = _focal_field(path, model_field, dm_index, command + probe)
     model_minus = _focal_field(path, model_field, dm_index, command - probe)
-    probe_field = 0.5 * (model_plus - model_minus)[dark_zone_mask]
+    probe_field = 0.5 * _mask_dark_zone(model_plus - model_minus, dark_zone_mask)
     return probe_field, diff
 
 
@@ -138,7 +152,10 @@ def estimate_field_pairwise(
         regularization: Tikhonov term for the per-pixel solve.
 
     Returns:
-        Complex field estimate over the masked pixels, shape ``(n_dark,)``.
+        Complex field estimate over the masked pixels, shape ``(n_dark,)``, or
+        ``(nlam, n_dark)`` for a chromatic ``input_field`` -- one independent
+        sub-band estimate per wavelength (the per-pixel solve treats each
+        wavelength/pixel as its own unknown).
     """
     if command is not None:
         path = _with_command(path, dm_index, command)  # probe around this command
@@ -153,15 +170,29 @@ def estimate_field_pairwise(
     probe_fields, diff_images = [], []
     for probe, probe_key in zip(probes, keys, strict=True):
         probe_field, diff = probe_measurement(
-            path, input_field, model_field, dm_index, probe, dark_zone_mask,
-            detector=detector, key=probe_key,
+            path,
+            input_field,
+            model_field,
+            dm_index,
+            probe,
+            dark_zone_mask,
+            detector=detector,
+            key=probe_key,
         )
         probe_fields.append(probe_field)
         diff_images.append(diff)
 
-    return pairwise_estimate(
-        jnp.stack(probe_fields), jnp.stack(diff_images), regularization=regularization
+    # Fold any wavelength axis into the per-pixel solve, then restore its shape:
+    # (n_probes, n_dark) stays (n_dark,); (n_probes, nlam, n_dark) -> (nlam, n_dark).
+    stacked_fields = jnp.stack(probe_fields)
+    stacked_diffs = jnp.stack(diff_images)
+    trailing = stacked_fields.shape[1:]
+    estimate = pairwise_estimate(
+        stacked_fields.reshape(stacked_fields.shape[0], -1),
+        stacked_diffs.reshape(stacked_diffs.shape[0], -1),
+        regularization=regularization,
     )
+    return estimate.reshape(trailing)
 
 
 def pairwise_estimate(probe_fields, diff_images, *, regularization=0.0):
@@ -269,9 +300,7 @@ class KalmanFieldEstimator(eqx.Module):
         x_new = x_pred + gain[..., 0] * innovation  # (n_pixels, 2)
         kh = jnp.einsum("kil,klj->kij", gain, h)  # (n_pixels, 2, 2)
         p_new = jnp.einsum("kij,kjl->kil", jnp.eye(2) - kh, p_pred)
-        return eqx.tree_at(
-            lambda e: (e.state, e.covariance), self, (x_new, p_new)
-        )
+        return eqx.tree_at(lambda e: (e.state, e.covariance), self, (x_new, p_new))
 
 
 def zwfs_calibrate(sensor, aperture_field, mode_basis, *, wavelength_nm):

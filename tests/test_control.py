@@ -116,6 +116,21 @@ def _relay_setup(npix=16, alpha=0.0556):
     return path, field, jnp.asarray(mask)
 
 
+def _relay_estimated_setup(npix=16, alpha=0.0556):
+    """The two-DM relay of ``_relay_setup`` plus the unaberrated model field and
+    the DM basis, for the honest (probe-estimated) two-DM loop. The model omits
+    the amplitude ripple, so the probe response is modelled without the unknown
+    aberration exactly as real hardware must."""
+    path, field, mask = _relay_setup(npix=npix, alpha=alpha)
+    pupil = Grid.pupil(npix)
+    x = np.asarray(pupil.coords)
+    x_grid, y_grid = np.meshgrid(x, x)
+    aperture = (x_grid**2 + y_grid**2 <= 0.25).astype(complex)
+    model_field = Field(data=jnp.asarray(aperture), grid=pupil, plane=PlaneKind.PUPIL)
+    dm_basis = _fourier_dm(npix, freqs=_RELAY_KS)
+    return path, dm_basis, field, model_field, mask
+
+
 class TestTwoDeformableMirrors:
     def test_command_spans_both_mirrors(self):
         path, field, mask = _relay_setup()
@@ -253,8 +268,16 @@ class TestEstimatedLoop:
         path, dm, input_field, model_field, mask = _estimated_setup()
         probes = probe_set(dm, amplitude_nm=2.0, n_probes=4)
         _, history = close_dark_hole(
-            path, input_field, 0, mask, n_steps=20, gain=0.4, regularization=1e-6,
-            estimator="pairwise", model_field=model_field, probes=probes,
+            path,
+            input_field,
+            0,
+            mask,
+            n_steps=20,
+            gain=0.4,
+            regularization=1e-6,
+            estimator="pairwise",
+            model_field=model_field,
+            probes=probes,
         )
         # Digs about an order of magnitude; depth floors on the model mismatch
         # (the probe response is modelled without the unknown aberration).
@@ -264,8 +287,16 @@ class TestEstimatedLoop:
         path, dm, input_field, model_field, mask = _estimated_setup()
         probes = probe_set(dm, amplitude_nm=2.0, n_probes=2)
         _, history = close_dark_hole(
-            path, input_field, 0, mask, n_steps=30, gain=0.4, regularization=1e-6,
-            estimator="kalman", model_field=model_field, probes=probes,
+            path,
+            input_field,
+            0,
+            mask,
+            n_steps=30,
+            gain=0.4,
+            regularization=1e-6,
+            estimator="kalman",
+            model_field=model_field,
+            probes=probes,
         )
         assert float(history[-1]) < 0.2 * float(history[0])
 
@@ -273,11 +304,25 @@ class TestEstimatedLoop:
         path, dm, input_field, model_field, mask = _estimated_setup()
         probes = probe_set(dm, amplitude_nm=2.0, n_probes=4)
         _, oracle = close_dark_hole(
-            path, input_field, 0, mask, n_steps=20, gain=0.4, regularization=1e-6,
+            path,
+            input_field,
+            0,
+            mask,
+            n_steps=20,
+            gain=0.4,
+            regularization=1e-6,
         )
         _, est = close_dark_hole(
-            path, input_field, 0, mask, n_steps=20, gain=0.4, regularization=1e-6,
-            estimator="pairwise", model_field=model_field, probes=probes,
+            path,
+            input_field,
+            0,
+            mask,
+            n_steps=20,
+            gain=0.4,
+            regularization=1e-6,
+            estimator="pairwise",
+            model_field=model_field,
+            probes=probes,
         )
         assert float(oracle[-1]) < float(est[-1])  # perfect knowledge digs deeper
 
@@ -285,14 +330,136 @@ class TestEstimatedLoop:
         path, _dm, input_field, model_field, mask = _estimated_setup()
         with pytest.raises(ValueError, match="probes"):
             close_dark_hole(
-                path, input_field, 0, mask, n_steps=3, gain=0.4,
-                regularization=1e-6, estimator="pairwise", model_field=model_field,
+                path,
+                input_field,
+                0,
+                mask,
+                n_steps=3,
+                gain=0.4,
+                regularization=1e-6,
+                estimator="pairwise",
+                model_field=model_field,
             )
 
     def test_rejects_unknown_estimator(self):
         path, _dm, input_field, _model_field, mask = _estimated_setup()
         with pytest.raises(ValueError, match="estimator"):
             close_dark_hole(
-                path, input_field, 0, mask, n_steps=3, gain=0.4,
-                regularization=1e-6, estimator="bogus",
+                path,
+                input_field,
+                0,
+                mask,
+                n_steps=3,
+                gain=0.4,
+                regularization=1e-6,
+                estimator="bogus",
             )
+
+
+class TestEstimatedTwoDeformableMirrors:
+    """The honest loop across two DMs: probe one mirror, estimate the dark-zone
+    field, drive both mirrors. No oracle read of the true field."""
+
+    def test_estimated_two_dm_beats_estimated_one_dm(self):
+        """A single pupil phase DM cannot null the two-sided real-symmetric
+        amplitude speckle whether it reads the true field or estimates it. Two
+        DMs supply the out-of-pupil Talbot amplitude quadrature, and the honest
+        probe-estimated loop reaches it WITHOUT the oracle: estimated two-DM
+        control digs the two-sided hole decisively below the estimated single-DM
+        floor."""
+        path, dm_basis, field, model_field, mask = _relay_estimated_setup()
+        probes = probe_set(dm_basis, amplitude_nm=2.0, n_probes=4)
+        _, hist_two = close_dark_hole(
+            path,
+            field,
+            (0, 2),
+            mask,
+            n_steps=60,
+            gain=0.5,
+            regularization=1e-6,
+            estimator="pairwise",
+            model_field=model_field,
+            probes=probes,
+            probe_dm=0,
+        )
+        _, hist_one = close_dark_hole(
+            path,
+            field,
+            (0,),
+            mask,
+            n_steps=60,
+            gain=0.5,
+            regularization=1e-6,
+            estimator="pairwise",
+            model_field=model_field,
+            probes=probes,
+            probe_dm=0,
+        )
+        assert hist_one[-1] > 0.3 * hist_one[0]  # one DM cannot null it
+        assert hist_two[-1] < 0.1 * hist_two[0]  # two DMs dig the two-sided hole
+        assert hist_two[-1] < 0.1 * hist_one[-1]  # decisively deeper, honestly
+
+    def test_estimated_two_dm_digs_a_broadband_hole(self):
+        """The honest loop digs a BROADBAND two-sided hole: sub-band pairwise
+        probing estimates the field per wavelength, and two DMs null the stacked
+        per-wavelength response. A single chromatic phase DM floors on the band-
+        averaged amplitude speckle; two DMs reduce the band contrast to a
+        degrees-of-freedom-limited broadband floor, all from probe images."""
+        path, dm_basis, mono, model_mono, mask = _relay_estimated_setup()
+        spectrum = Spectrum.tophat(WL, 0.15, 3)
+        field = broadcast_to_spectrum(mono, spectrum)
+        model = broadcast_to_spectrum(model_mono, spectrum)
+        probes = probe_set(dm_basis, amplitude_nm=2.0, n_probes=4)
+        _, hist_two = close_dark_hole(
+            path,
+            field,
+            (0, 2),
+            mask,
+            n_steps=60,
+            gain=0.5,
+            regularization=1e-6,
+            estimator="pairwise",
+            model_field=model,
+            probes=probes,
+            probe_dm=0,
+        )
+        _, hist_one = close_dark_hole(
+            path,
+            field,
+            (0,),
+            mask,
+            n_steps=60,
+            gain=0.5,
+            regularization=1e-6,
+            estimator="pairwise",
+            model_field=model,
+            probes=probes,
+            probe_dm=0,
+        )
+        assert hist_one[-1] > 0.5 * hist_one[0]  # one DM cannot null it broadband
+        assert hist_two[-1] < 0.6 * hist_two[0]  # two DMs reduce the band contrast
+        assert hist_two[-1] < 0.6 * hist_one[-1]  # the honest broadband two-DM edge
+
+    def test_estimated_two_dm_kalman_broadband(self):
+        """The recursive Kalman estimator also drives a broadband two-DM hole:
+        one probe pair per step, per sub-band (the per-(wavelength, pixel) state
+        accumulates rank over time), digging the band contrast from probe images."""
+        path, dm_basis, mono, model_mono, mask = _relay_estimated_setup()
+        spectrum = Spectrum.tophat(WL, 0.15, 3)
+        field = broadcast_to_spectrum(mono, spectrum)
+        model = broadcast_to_spectrum(model_mono, spectrum)
+        probes = probe_set(dm_basis, amplitude_nm=2.0, n_probes=3)
+        _, history = close_dark_hole(
+            path,
+            field,
+            (0, 2),
+            mask,
+            n_steps=50,
+            gain=0.4,
+            regularization=1e-6,
+            estimator="kalman",
+            model_field=model,
+            probes=probes,
+            probe_dm=0,
+        )
+        assert float(history[-1]) < 0.6 * float(history[0])  # digs the broadband hole

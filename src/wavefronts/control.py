@@ -68,8 +68,11 @@ def close_dark_hole(
     estimates the field from probe images (see
     :func:`wavefronts.sensing.estimate_field_pairwise`), the hardware-realistic
     loop: it builds the control Jacobian on the ``model_field`` and floors on the
-    model mismatch rather than digging arbitrarily deep. The estimated loop is
-    monochromatic for now.
+    model mismatch rather than digging arbitrarily deep. A chromatic
+    ``input_field`` drives a BROADBAND estimated loop by sub-band probing: the
+    field is estimated per wavelength (``probe_measurement`` reads a per-sub-band
+    image) and the DMs are driven against the same stacked, ``sqrt``-weighted
+    per-wavelength response the oracle broadband loop uses.
 
     Args:
         path: An ``OpticalPath`` ending at the focal plane whose ``dm_indices``
@@ -103,9 +106,8 @@ def close_dark_hole(
     Raises:
         TypeError: If any ``dm_indices`` stage is not a ``PhaseScreen``.
         ValueError: If ``regularization`` is not positive, the dark zone is
-            empty, ``estimator`` is unknown, or ``"pairwise"`` is missing
+            empty, ``estimator`` is unknown, or an estimated loop is missing
             ``probes``.
-        NotImplementedError: If ``"pairwise"`` is used with a chromatic field.
     """
     indices = (dm_indices,) if isinstance(dm_indices, int) else tuple(dm_indices)
     for i in indices:
@@ -128,10 +130,6 @@ def close_dark_hole(
     if estimated:
         if probes is None:
             raise ValueError(f"estimator={estimator!r} requires probes")
-        if input_field.spectrum is not None:
-            raise NotImplementedError(
-                "broadband estimated control is not yet supported"
-            )
         if probe_dm is None:
             probe_dm = indices[0]
     # The control Jacobian is known from the model; the honest estimated loop
@@ -152,6 +150,19 @@ def close_dark_hole(
     spectrum = input_field.spectrum
     weights = jnp.ones(1) if spectrum is None else spectrum.weights
     sqrt_weights = jnp.sqrt(weights)
+    n_dark = int(jnp.sum(mask))
+    # Per-(wavelength, pixel) weight matching ``dark_zone``'s stacked ordering
+    # (wavelength-major, pixel-minor); ones for a monochromatic field.
+    stack_weights = jnp.repeat(sqrt_weights, n_dark)
+
+    def estimated_residual(field_estimate):
+        """Weighted Re/Im EFC residual from a (per-wavelength) field estimate.
+
+        Weights the estimate to match the control Jacobian's stacked dark zone
+        (ones for a monochromatic field), then stacks the real and imaginary rows.
+        """
+        weighted = stack_weights * field_estimate.reshape(-1)
+        return jnp.concatenate([jnp.real(weighted), jnp.imag(weighted)])
 
     def set_commands(command):
         chunks = jnp.split(command, split_points)
@@ -215,8 +226,7 @@ def close_dark_hole(
                 key=keys[i],
                 regularization=regularization,
             )
-            residual = jnp.concatenate([jnp.real(e_hat), jnp.imag(e_hat)])
-            command = command - gain * (control_matrix @ residual)
+            command = command - gain * (control_matrix @ estimated_residual(e_hat))
         return command, jnp.stack(history)
 
     if estimator == "kalman":
@@ -233,25 +243,37 @@ def close_dark_hole(
         # measurements (small R) but keep a little process noise so the filter
         # stays responsive to the residual model error as the hole digs.
         kalman = KalmanFieldEstimator.init(
-            int(jnp.sum(mask)),
+            stack_weights.shape[0],
             initial_variance=1.0,
             process_noise=1e-12,
             measurement_noise=1e-16,
         )
+        # The Kalman state is the UNWEIGHTED per-(wavelength, pixel) field, so it
+        # predicts with the unweighted field change and measures unweighted probe
+        # fields; the sqrt-weighting enters only when forming the residual.
+        g_dz_unweighted = g_dz / stack_weights[:, jnp.newaxis]
         command = jnp.zeros(n_total)
         last_command = jnp.zeros(n_total)
         history = []
         for i in range(n_steps):
             history.append(contrast(focal_field(command)))
-            field_change = g_dz @ (command - last_command)
+            field_change = g_dz_unweighted @ (command - last_command)
             probe = probes[i % len(probes)]
             probe_field, diff = probe_measurement(
-                set_commands(command), input_field, model, probe_dm, probe, mask,
-                detector=detector, key=keys[i],
+                set_commands(command),
+                input_field,
+                model,
+                probe_dm,
+                probe,
+                mask,
+                detector=detector,
+                key=keys[i],
             )
-            kalman = kalman.update(probe_field, diff, field_change=field_change)
-            residual = jnp.concatenate([jnp.real(kalman.field), jnp.imag(kalman.field)])
+            kalman = kalman.update(
+                probe_field.reshape(-1), diff.reshape(-1), field_change=field_change
+            )
             last_command = command
+            residual = estimated_residual(kalman.field)
             command = command - gain * (control_matrix @ residual)
         return command, jnp.stack(history)
 
