@@ -32,6 +32,7 @@ from wavefronts.control import (
     StrokeMinController,
     close_dark_hole,
 )
+from wavefronts.maintenance import maintain_dark_hole, make_detector
 from wavefronts.sensing import (
     AbstractEstimator,
     KalmanEstimator,
@@ -71,6 +72,8 @@ __all__ = [
     "correlated_drift_field",
     "estimate_field_pairwise",
     "frozen_flow_sequence",
+    "maintain_dark_hole",
+    "make_detector",
     "pairwise_estimate",
     "probe_set",
     "von_karman_screen",
