@@ -171,6 +171,100 @@ def correlated_drift_field(
     )
 
 
+def correlated_channel_fields(
+    mcl,
+    shared_covariance_nm2,
+    *,
+    key,
+    frequencies_hz,
+    psd,
+    normalizations,
+    local=None,
+    epoch_jd=J2000_JD,
+    coherent=True,
+):
+    """Correlated per-channel speckle fields from one shared-mode draw.
+
+    Draws ONE correlated spectral realization of the SHARED modes (the
+    segment/trunk drift every channel sees) and imprints it through each
+    channel's own ``g_shared`` block, so the returned fields realize the
+    exact cross-channel covariance ``G_a Sigma (G_b)^H`` -- the physics that
+    makes differential imaging work. Optional per-channel LOCAL blocks
+    (non-common-path drift) are drawn INDEPENDENTLY per channel and
+    appended; they are the part no cross-channel difference removes.
+
+    Normalization is PER CHANNEL (each channel's own reference peak,
+    including its split fraction), so a real split ratio cancels in
+    per-channel contrast. ``coherent=True`` by default -- the common-mode
+    signal is a FIELD effect (the pinning cross term carries it), a
+    deliberate divergence from the single-field default.
+
+    Args:
+        mcl: A ``physicaloptix.MultiChannelLinearization`` (the per-channel
+            ``e_nom`` / ``g_shared`` blocks of one shared basis).
+        shared_covariance_nm2: Target ``(m, m)`` shared-mode covariance.
+        key: PRNG key freezing the shared draw (and seeding the local ones).
+        frequencies_hz: Temporal frequency grid, shape ``(f,)``.
+        psd: Temporal PSD shape over those frequencies.
+        normalizations: Dict mapping EVERY channel name to the intensity
+            that maps to unit contrast in that channel.
+        local: Optional dict mapping a channel name to ``(g_local,
+            covariance_local_nm2)`` -- that channel's independent
+            non-common-path block.
+        epoch_jd: Julian Date mapping to ``time_s = 0``.
+        coherent: Include the pinning cross term. Default ``True``.
+
+    Returns:
+        A dict mapping each channel name to an ``AnalyticSpeckleField``.
+
+    Raises:
+        ValueError: If a channel is missing a normalization, or the shared
+            covariance fails ``correlated_drift_field``'s validity checks.
+    """
+    missing = [name for name in mcl.names if name not in normalizations]
+    if missing:
+        raise ValueError(
+            f"normalizations missing for channel(s) {missing}; every channel "
+            "needs its own reference peak (a split ratio changes it)"
+        )
+    psd_arr = np.asarray(psd, dtype=float)
+    total = float(psd_arr.sum())
+    if total <= 0.0:
+        raise ValueError("psd must have positive total power")
+    weights = jnp.asarray(2.0 * psd_arr / total)
+
+    key_shared, key_locals = jax.random.split(key)
+    shared_amp, shared_phase = _draw_correlated_spectrum(
+        shared_covariance_nm2, key_shared, weights
+    )
+
+    fields = {}
+    for i, name in enumerate(mcl.names):
+        channel = mcl[name]
+        g = channel.g_shared
+        amplitudes, phases = shared_amp, shared_phase
+        if local is not None and name in local:
+            g_local, covariance_local = local[name]
+            local_amp, local_phase = _draw_correlated_spectrum(
+                covariance_local, jax.random.fold_in(key_locals, i), weights
+            )
+            g = jnp.concatenate([g, jnp.asarray(g_local)], axis=0)
+            amplitudes = jnp.concatenate([shared_amp, local_amp], axis=0)
+            phases = jnp.concatenate([shared_phase, local_phase], axis=0)
+        fields[name] = AnalyticSpeckleField(
+            channel.e_nom,
+            g,
+            amplitudes,
+            jnp.asarray(frequencies_hz),
+            phases,
+            normalizations[name],
+            pixel_scale_lod=channel.pixel_scale_lod,
+            epoch_jd=epoch_jd,
+            coherent=coherent,
+        )
+    return fields
+
+
 class TabulatedSpeckleField(AbstractSpeckleField):
     """Speckle field replaying a precomputed mode-coefficient trajectory.
 
@@ -254,6 +348,21 @@ class TabulatedSpeckleField(AbstractSpeckleField):
         return jax.vmap(lambda col: jnp.interp(t, self.times_s, col), in_axes=1)(
             self.eps_table
         )
+
+    def eps(self, time_s):
+        """The mode coefficients at an elapsed time, shape ``(m,)``.
+
+        The public accessor a maintenance driver uses to inject this
+        trajectory into a wavefront-error screen (the endpoints are held
+        outside the sampled range, matching ``realize``).
+
+        Args:
+            time_s: Elapsed time in seconds.
+
+        Returns:
+            The interpolated coefficients in the basis's length unit.
+        """
+        return self._eps(time_s)
 
     def realize(self, *, wavelength_nm, time_s=0.0):
         """Speckle contrast delta at ``time_s`` (see class docstring)."""

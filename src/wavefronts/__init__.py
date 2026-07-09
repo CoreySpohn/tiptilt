@@ -44,7 +44,11 @@ from wavefronts.sensing import (
     zwfs_calibrate,
     zwfs_reconstruct,
 )
-from wavefronts.speckle import TabulatedSpeckleField, correlated_drift_field
+from wavefronts.speckle import (
+    TabulatedSpeckleField,
+    correlated_channel_fields,
+    correlated_drift_field,
+)
 from wavefronts.turbulence import frozen_flow_sequence, von_karman_screen
 
 __version__ = "0.0.1"
@@ -63,6 +67,7 @@ __all__ = [
     "TabulatedSpeckleField",
     "__version__",
     "close_dark_hole",
+    "correlated_channel_fields",
     "correlated_drift_field",
     "estimate_field_pairwise",
     "frozen_flow_sequence",
