@@ -13,6 +13,7 @@ real system cannot take.
 import equinox as eqx
 import jax
 import jax.numpy as jnp
+from jaxtyping import Array
 from physicaloptix import Field, PlaneKind
 
 
@@ -361,3 +362,187 @@ def zwfs_reconstruct(image, reference, interaction, *, regularization=0.0):
     n_modes = interaction.shape[1]
     gram = interaction.T @ interaction + regularization * jnp.eye(n_modes)
     return jnp.linalg.solve(gram, interaction.T @ diff)
+
+
+class AbstractEstimator(eqx.Module):
+    """The estimation seam: a dark-zone field estimate per control step.
+
+    ``estimate(model, command, key) -> (new_self, e_hat)`` where ``model`` is
+    the loop's ``DarkZoneModel``, ``command`` the current stacked DM command,
+    and ``e_hat`` the UNWEIGHTED complex dark-zone estimate (``(n_dark,)``
+    mono, ``(nlam, n_dark)`` broadband). Stateless estimators return
+    themselves unchanged; recursive ones (Kalman) advance their carried
+    state. The estimated drivers unroll in Python, so estimators may hold
+    plain-Python bookkeeping.
+    """
+
+    def estimate(self, model, command, *, key=None):
+        """One measurement of the dark-zone field at the given command."""
+        raise NotImplementedError
+
+
+class OracleEstimator(AbstractEstimator):
+    """Perfect knowledge: read the true field by re-propagation.
+
+    The achievable-contrast reference every honest estimator is compared
+    against (a real system cannot take this shortcut).
+
+    Attributes:
+        input_field: The true entrance field.
+    """
+
+    input_field: eqx.Module
+
+    def estimate(self, model, command, *, key=None):
+        """Propagate the true field and read the dark zone."""
+        data = model.focal_of(command, self.input_field)
+        return self, model.dark_zone_unweighted(data)
+
+
+class PairwiseEstimator(AbstractEstimator):
+    """Batch pairwise probing: a full probe set every step. Stateless.
+
+    Wraps :func:`estimate_field_pairwise` on the seam: each step applies the
+    probe set as positive/negative pairs around the current command, reads
+    the difference images off the TRUE field (optionally through a
+    detector), and solves the per-pixel least squares against the DESIGN
+    model's probe fields.
+
+    Attributes:
+        input_field: The true entrance field (measurements).
+        model_field: The design entrance field (probe model).
+        probes: Probe command vectors.
+        probe_dm: Stage index of the probe mirror.
+        detector: Optional noise model ``callable(image, key) -> image``.
+        regularization: Tikhonov term of the per-pixel solve.
+    """
+
+    input_field: eqx.Module
+    model_field: eqx.Module
+    probes: tuple
+    probe_dm: int = eqx.field(static=True)
+    detector: object = eqx.field(static=True, default=None)
+    regularization: float = eqx.field(static=True, default=0.0)
+
+    def estimate(self, model, command, *, key=None):
+        """A batch pairwise estimate at the current command."""
+        e_hat = estimate_field_pairwise(
+            model.set_commands(command),
+            self.input_field,
+            self.probe_dm,
+            list(self.probes),
+            model.mask,
+            model_field=self.model_field,
+            detector=self.detector,
+            key=key,
+            regularization=self.regularization,
+        )
+        return self, e_hat
+
+
+class KalmanEstimator(AbstractEstimator):
+    """Recursive estimation: one probe pair per step, rank over time.
+
+    Wraps :class:`KalmanFieldEstimator` on the seam. Each step predicts the
+    field change from the applied command delta through the model Jacobian
+    (unweighted), measures ONE probe pair, and updates the per-pixel filter.
+    The carried state is the filter plus the last command and the probe
+    cycle position.
+
+    Attributes:
+        filter: The per-pixel Kalman filter.
+        probes: Probe command vectors, cycled one per step.
+        step_index: Position in the probe cycle.
+        last_command: The command the previous estimate was made at.
+        input_field: The true entrance field.
+        model_field: The design entrance field.
+        probe_dm: Stage index of the probe mirror.
+        detector: Optional noise model.
+    """
+
+    filter: KalmanFieldEstimator
+    probes: tuple
+    step_index: Array
+    last_command: Array
+    input_field: eqx.Module
+    model_field: eqx.Module
+    probe_dm: int = eqx.field(static=True)
+    detector: object = eqx.field(static=True, default=None)
+
+    @classmethod
+    def build(
+        cls,
+        model,
+        *,
+        input_field,
+        model_field,
+        probes,
+        probe_dm,
+        detector=None,
+        initial_variance=1.0,
+        process_noise=1e-12,
+        measurement_noise=1e-16,
+    ):
+        """A fresh filter sized to the model's stacked dark zone.
+
+        The default hyperparameters suit a near-noiseless model: trust the
+        measurements (small R) but keep a little process noise so the filter
+        stays responsive to residual model error as the hole digs.
+
+        Args:
+            model: The loop's ``DarkZoneModel``.
+            input_field: The true entrance field.
+            model_field: The design entrance field.
+            probes: Probe command vectors (cycled).
+            probe_dm: Stage index of the probe mirror.
+            detector: Optional noise model.
+            initial_variance: Diffuse prior variance per quadrature.
+            process_noise: Per-step process-noise variance.
+            measurement_noise: Detector-noise variance.
+
+        Returns:
+            A ``KalmanEstimator``.
+        """
+        return cls(
+            filter=KalmanFieldEstimator.init(
+                model.stack_weights.shape[0],
+                initial_variance=initial_variance,
+                process_noise=process_noise,
+                measurement_noise=measurement_noise,
+            ),
+            probes=tuple(probes),
+            step_index=jnp.asarray(0),
+            last_command=jnp.zeros(model.n_total),
+            input_field=input_field,
+            model_field=model_field,
+            probe_dm=probe_dm,
+            detector=detector,
+        )
+
+    def estimate(self, model, command, *, key=None):
+        """Predict through the command delta, update from one probe pair."""
+        # The filter state is the UNWEIGHTED per-(wavelength, pixel) field, so
+        # predict with the unweighted field change; the sqrt-weighting enters
+        # only in the controller's residual.
+        g_unweighted = model.g_dz / model.stack_weights[:, jnp.newaxis]
+        field_change = g_unweighted @ (command - self.last_command)
+        probe = self.probes[int(self.step_index) % len(self.probes)]
+        probe_field, diff = probe_measurement(
+            model.set_commands(command),
+            self.input_field,
+            self.model_field,
+            self.probe_dm,
+            probe,
+            model.mask,
+            detector=self.detector,
+            key=key,
+        )
+        new_filter = self.filter.update(
+            probe_field.reshape(-1), diff.reshape(-1), field_change=field_change
+        )
+        new_self = eqx.tree_at(
+            lambda e: (e.filter, e.step_index, e.last_command),
+            self,
+            (new_filter, self.step_index + 1, command),
+        )
+        return new_self, new_filter.field

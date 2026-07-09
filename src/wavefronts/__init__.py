@@ -24,9 +24,20 @@ turbulence shares the loop, the mode basis, and the residual interface.
 The distribution name is a working placeholder and may change before release.
 """
 
-from wavefronts.control import close_dark_hole
+from wavefronts.control import (
+    AbstractController,
+    DarkZoneModel,
+    EFCController,
+    PredictiveController,
+    StrokeMinController,
+    close_dark_hole,
+)
 from wavefronts.sensing import (
+    AbstractEstimator,
+    KalmanEstimator,
     KalmanFieldEstimator,
+    OracleEstimator,
+    PairwiseEstimator,
     estimate_field_pairwise,
     pairwise_estimate,
     probe_set,
@@ -39,7 +50,16 @@ from wavefronts.turbulence import frozen_flow_sequence, von_karman_screen
 __version__ = "0.0.1"
 
 __all__ = [
+    "AbstractController",
+    "AbstractEstimator",
+    "DarkZoneModel",
+    "EFCController",
+    "KalmanEstimator",
     "KalmanFieldEstimator",
+    "OracleEstimator",
+    "PairwiseEstimator",
+    "PredictiveController",
+    "StrokeMinController",
     "TabulatedSpeckleField",
     "__version__",
     "close_dark_hole",
