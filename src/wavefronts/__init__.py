@@ -33,6 +33,12 @@ from wavefronts.control import (
     close_dark_hole,
 )
 from wavefronts.maintenance import maintain_dark_hole, make_detector
+from wavefronts.multichannel import (
+    FeedForwardController,
+    MultiChannelModel,
+    run_multichannel,
+    shared_dm_command,
+)
 from wavefronts.sensing import (
     AbstractEstimator,
     KalmanEstimator,
@@ -59,8 +65,10 @@ __all__ = [
     "AbstractEstimator",
     "DarkZoneModel",
     "EFCController",
+    "FeedForwardController",
     "KalmanEstimator",
     "KalmanFieldEstimator",
+    "MultiChannelModel",
     "OracleEstimator",
     "PairwiseEstimator",
     "PredictiveController",
@@ -76,6 +84,8 @@ __all__ = [
     "make_detector",
     "pairwise_estimate",
     "probe_set",
+    "run_multichannel",
+    "shared_dm_command",
     "von_karman_screen",
     "zwfs_calibrate",
     "zwfs_reconstruct",
