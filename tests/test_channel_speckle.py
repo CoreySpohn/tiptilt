@@ -175,3 +175,24 @@ class TestTabulatedEpsAccessor:
         np.testing.assert_allclose(
             np.asarray(field.eps(5.0)), np.asarray([2.0, 4.0]), atol=1e-12
         )  # held at the endpoint
+
+
+class TestOptixstuffConformance:
+    def test_channel_fields_implement_the_speckle_contract(self):
+        from optixstuff.speckle import AbstractSpeckleField
+
+        mcl = _synthetic_mcl(jax.random.PRNGKey(0))
+        frequencies, psd = _white_psd()
+        fields = correlated_channel_fields(
+            mcl,
+            jnp.eye(M_SHARED),
+            key=jax.random.PRNGKey(1),
+            frequencies_hz=frequencies,
+            psd=psd,
+            normalizations={"a": 1.0, "b": 1.0},
+        )
+        for field in fields.values():
+            assert isinstance(field, AbstractSpeckleField)
+            delta = field.realize(wavelength_nm=500.0, time_s=30.0)
+            assert delta.shape == (NPIX, NPIX)
+            assert bool(jnp.all(jnp.isfinite(delta)))
