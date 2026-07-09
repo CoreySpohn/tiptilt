@@ -107,3 +107,59 @@ class TestSweep:
         with pytest.raises(KeyError, match="algorithm"):
             run(dig_from_cold(), "does-not-exist")
         assert "oracle-efc" in ALGORITHMS
+
+
+class TestUserExtension:
+    @pytest.mark.slow
+    def test_actuator_dm_scenario_runs_in_actuator_space(self):
+        from wavefronts.dm import DeformableMirror  # noqa: F401 (the device path)
+
+        scenario = dig_from_cold(npix=24, actuator_dm=True)
+        result = run(scenario, "oracle-efc")
+        # Actuator-space command vector; digs to the fitting-error floor.
+        assert result.command.shape[0] > 50  # many actuators, not 8 modes
+        assert result.metrics.dig_factor < 0.1
+
+    @pytest.mark.slow
+    def test_user_registered_controller_via_a_callable_builder(self):
+        """The extension point: register a CUSTOM stateful control law and
+        run it against the same scenarios and metrics."""
+        import equinox as eqx
+        import jax.numpy as jnp
+
+        from wavefronts.control import AbstractController, EFCController
+
+        class LeakyIntegratorEFC(AbstractController):
+            """EFC with a leaky-integrator memory (a genuinely stateful law)."""
+
+            efc: EFCController
+            accumulated: jnp.ndarray
+            leak: float = eqx.field(static=True)
+
+            def command_delta(self, estimate):
+                _, raw = self.efc.command_delta(estimate)
+                delta = raw - self.leak * self.accumulated
+                new_self = eqx.tree_at(
+                    lambda c: c.accumulated, self, self.accumulated + delta
+                )
+                return new_self, delta
+
+        def build_leaky(model, params, gain):
+            return LeakyIntegratorEFC(
+                efc=EFCController.build(
+                    model, gain=gain, regularization=params["regularization"]
+                ),
+                accumulated=jnp.zeros(model.n_total),
+                leak=0.02,
+            )
+
+        ALGORITHMS["leaky-efc"] = {
+            "estimator": ALGORITHMS["oracle-efc"]["estimator"],
+            "controller": build_leaky,
+            "gain": None,
+        }
+        try:
+            result = run(dig_from_cold(), "leaky-efc")
+            assert result.metrics.dig_factor < 0.1  # the custom law digs
+        finally:
+            del ALGORITHMS["leaky-efc"]

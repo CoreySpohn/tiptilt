@@ -189,6 +189,8 @@ ALGORITHMS = {
 
 
 def _controller_for(kind, model, p, gain):
+    if callable(kind):  # a user-registered builder: (model, params, gain) -> law
+        return kind(model, p, gain)
     if kind == "efc":
         return EFCController.build(model, gain=gain, regularization=p["regularization"])
     if kind == "strokemin":
@@ -349,23 +351,36 @@ def _aperture(npix):
     return grid, xg, yg, (xg**2 + yg**2 <= 0.25).astype(float)
 
 
-def dig_from_cold(npix=16, n_steps=15, stroke_cap_nm=None):
+def dig_from_cold(npix=16, n_steps=15, stroke_cap_nm=None, actuator_dm=False):
     """A single-DM dig from a static phase aberration (the digging baseline).
 
     Args:
         npix: Pupil sampling.
         n_steps: Control iterations.
         stroke_cap_nm: Optional actuator range.
+        actuator_dm: Command a programmable actuator-grid
+            ``DeformableMirror`` (influence functions, actuator-space
+            commands) instead of the modal Fourier mirror.
 
     Returns:
         A ``Scenario`` (regime ``dig``).
     """
     grid, xg, yg, aperture = _aperture(npix)
     focal = Grid.focal(32, 0.5)
-    dm = _fourier_basis(npix, [(3, 1), (3, 0), (2, 1), (4, 1)])
+    if actuator_dm:
+        from wavefronts.dm import DeformableMirror
+
+        device = DeformableMirror.build(
+            grid, n_actuators=max(12, npix // 2), wavelength_nm=WL
+        )
+        dm = device.screen.basis
+        dm_stage = Stage("dm", device.screen)
+    else:
+        dm = _fourier_basis(npix, [(3, 1), (3, 0), (2, 1), (4, 1)])
+        dm_stage = Stage("dm", PhaseScreen(dm, grid, wavelength_nm=WL))
     path = OpticalPath(
         stages=(
-            Stage("dm", PhaseScreen(dm, grid, wavelength_nm=WL)),
+            dm_stage,
             Stage("science", Fraunhofer(grid_in=grid, grid_out=focal)),
         )
     )
@@ -381,7 +396,11 @@ def dig_from_cold(npix=16, n_steps=15, stroke_cap_nm=None):
     fx = np.asarray(focal.coords)
     fxg, fyg = np.meshgrid(fx, fx)
     mask = jnp.asarray((np.abs(fxg - 3.0) < 0.6) & (np.abs(fyg - 1.0) < 0.8))
-    initial = 1e-2  # a modest target the stroke-min law can aim for
+    # Stroke minimization aims at a RELATIVE target: 5 percent of the actual
+    # starting contrast (an absolute default can sit above the initial level,
+    # where the least-stroke answer is correctly to do nothing).
+    out, _ = path.propagate(input_field)
+    initial = float(jnp.mean(jnp.abs(out.data[mask]) ** 2))
     return Scenario(
         regime="dig",
         stroke_cap_nm=stroke_cap_nm,
@@ -396,7 +415,7 @@ def dig_from_cold(npix=16, n_steps=15, stroke_cap_nm=None):
             regularization=1e-8,
             probes=probe_set(dm, amplitude_nm=2.0, n_probes=3),
             probe_dm=0,
-            target_contrast=initial,
+            target_contrast=0.05 * initial,
         ),
     )
 

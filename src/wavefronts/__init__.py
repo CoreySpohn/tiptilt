@@ -32,6 +32,7 @@ from wavefronts.control import (
     StrokeMinController,
     close_dark_hole,
 )
+from wavefronts.dm import DeformableMirror, dm_influence_basis
 from wavefronts.maintenance import maintain_dark_hole, make_detector
 from wavefronts.multichannel import (
     FeedForwardController,
@@ -81,6 +82,7 @@ __all__ = [
     "AbstractController",
     "AbstractEstimator",
     "DarkZoneModel",
+    "DeformableMirror",
     "EFCController",
     "FeedForwardController",
     "KalmanEstimator",
@@ -100,6 +102,7 @@ __all__ = [
     "correlated_channel_fields",
     "correlated_drift_field",
     "dig_from_cold",
+    "dm_influence_basis",
     "dual_science_common_mode",
     "estimate_field_pairwise",
     "frozen_flow_sequence",
