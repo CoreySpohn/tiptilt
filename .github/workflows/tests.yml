@@ -33,5 +33,7 @@ jobs:
     - name: Override physicaloptix from git main
       run: uv pip install "physicaloptix @ git+https://github.com/CoreySpohn/physicaloptix.git"
 
+    # Plain pytest: `uv run` would re-sync the project env from PyPI and
+    # silently replace the git-main physicaloptix override above.
     - name: Run tests
-      run: uv run pytest tests/ -v --tb=short
+      run: pytest tests/ -v --tb=short
