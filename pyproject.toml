@@ -11,7 +11,7 @@ readme = "README.md"
 requires-python = ">=3.11"
 license = { file = "LICENSE" }
 classifiers = [
-    "Development Status :: 1 - Planning",
+    "Development Status :: 3 - Alpha",
     "Intended Audience :: Science/Research",
     "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",
@@ -30,7 +30,7 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pre-commit"]
-test = ["pytest", "hypothesis", "pytest-cov"]
+test = ["pytest", "hypothesis", "pytest-cov", "pytest-xdist"]
 
 [tool.pytest.ini_options]
 # Loop-convergence (physics regression) tests dominate the suite; run the
