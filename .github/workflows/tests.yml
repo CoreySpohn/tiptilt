@@ -18,22 +18,31 @@ jobs:
     steps:
     - uses: actions/checkout@v6
 
-    - name: Install uv and set the python version
+    - name: Install uv
       uses: astral-sh/setup-uv@v7
       with:
-        python-version: ${{ matrix.python-version }}
         enable-cache: true
-        activate-environment: true
+
+    - name: Create venv
+      run: uv venv .venv --python ${{ matrix.python-version }}
 
     - name: Install package with test dependencies
       run: uv pip install -e ".[test]"
+      env:
+        VIRTUAL_ENV: ${{ github.workspace }}/.venv
 
     # physicaloptix main carries the multi-path modules this package imports;
     # drop this override once a physicaloptix release includes them.
     - name: Override physicaloptix from git main
       run: uv pip install "physicaloptix @ git+https://github.com/CoreySpohn/physicaloptix.git"
+      env:
+        VIRTUAL_ENV: ${{ github.workspace }}/.venv
 
-    # Plain pytest: `uv run` would re-sync the project env from PyPI and
-    # silently replace the git-main physicaloptix override above.
+    - name: Diag pytest present
+      run: .venv/bin/pytest --version
+
+    - name: Diag imports
+      run: .venv/bin/python -c "import jax, physicaloptix, tiptilt; from physicaloptix import BeamSplitter; print('jax', jax.__version__)"
+
     - name: Run tests
-      run: pytest tests/ -v --tb=short
+      run: .venv/bin/pytest tests/ -v --tb=short
