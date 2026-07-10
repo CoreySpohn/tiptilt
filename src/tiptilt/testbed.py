@@ -37,6 +37,7 @@ from physicaloptix import (
     PhaseScreen,
     PlaneKind,
     Stage,
+    zernike_basis,
 )
 
 from tiptilt.control import (
@@ -45,6 +46,7 @@ from tiptilt.control import (
     PredictiveController,
     StrokeMinController,
 )
+from tiptilt.lowfs import run_pointing_loop
 from tiptilt.maintenance import maintain_dark_hole
 from tiptilt.multichannel import run_multichannel
 from tiptilt.sensing import (
@@ -286,6 +288,34 @@ def _run_multichannel(scenario, spec):
     )
 
 
+def _run_pointing(scenario, spec):
+    p = scenario.params
+    gain = spec["gain"] if spec["gain"] is not None else p["gain"]
+    result = run_pointing_loop(
+        p["system"],
+        p["input_field"],
+        corrector_stage=p["corrector_stage"],
+        drift_stage=p["drift_stage"],
+        sense=p["sense"],
+        science=p["science"],
+        mask=p["mask"],
+        drift_table=p["drift_table"],
+        n_steps=p["n_steps"],
+        gain=gain,
+        regularization=p["regularization"],
+    )
+    # Score the reference-subtracted series: the absolute mask intensity is
+    # dominated by the static diffraction floor; the excess is the jitter axis.
+    return RunResult(
+        history=result["excess"],
+        command=result["command"],
+        metrics=compute_metrics(
+            result["excess"], result["command"], stroke_cap_nm=scenario.stroke_cap_nm
+        ),
+        excess={"residual_nm": result["residual_nm"], "absolute": result["history"]},
+    )
+
+
 def run(scenario, algorithm):
     """Run one algorithm on one scenario.
 
@@ -305,6 +335,7 @@ def run(scenario, algorithm):
         "dig": _run_dig,
         "maintain": _run_maintain,
         "multichannel": _run_multichannel,
+        "pointing": _run_pointing,
     }
     if scenario.regime not in dispatch:
         raise ValueError(f"unknown regime {scenario.regime!r}")
@@ -699,5 +730,82 @@ def dual_science_common_mode(npix=16, n_steps=6):
             n_steps=n_steps,
             gain=1.0,
             regularization=1e-10,
+        ),
+    )
+
+
+def _pointing_system(npix=16, sensor_defocus_nm=25.0):
+    grid, _xg, _yg, aperture = _aperture(npix)
+    focal = Grid.focal(32, 0.5)
+    zern = zernike_basis(grid, 4)  # Noll 1..4: piston, tip, tilt, focus
+    low_order = ModeBasis(B=zern.B[1:], coeffs=jnp.zeros(3))
+    corrector = ModeBasis(B=zern.B[1:], coeffs=jnp.zeros(3))
+    bias = ModeBasis(B=zern.B[3:], coeffs=jnp.asarray([sensor_defocus_nm]))
+    trunk = OpticalPath(
+        stages=(
+            Stage("jitter", PhaseScreen(low_order, grid, wavelength_nm=WL)),
+            Stage("fsm", PhaseScreen(corrector, grid, wavelength_nm=WL)),
+        )
+    )
+    split = BeamSplitter.energy(0.2, grid=grid, plane=PlaneKind.PUPIL)
+    sci = OpticalPath(
+        stages=(Stage("science", Fraunhofer(grid_in=grid, grid_out=focal)),)
+    )
+    sensor_arm = OpticalPath(
+        stages=(
+            Stage("defocus_bias", PhaseScreen(bias, grid, wavelength_nm=WL)),
+            Stage("lowfscam", Fraunhofer(grid_in=grid, grid_out=focal)),
+        )
+    )
+    system = OpticalSystem(
+        trunk=trunk,
+        split=split,
+        branches=(
+            Branch("sci", "transmit", sci),
+            Branch("lowfs", "reflect", sensor_arm),
+        ),
+    )
+    input_field = Field(
+        data=jnp.asarray(aperture).astype(complex), grid=grid, plane=PlaneKind.PUPIL
+    )
+    fx = np.asarray(focal.coords)
+    fxg, fyg = np.meshgrid(fx, fx)
+    radius = np.hypot(fxg, fyg)
+    mask = jnp.asarray((radius > 1.5) & (radius < 4.0))
+    return system, input_field, mask
+
+
+def pointing_jitter(npix=16, n_steps=8, sensor_defocus_nm=25.0):
+    """Hold the beam against tip/tilt/focus jitter with a pickoff low-order loop.
+
+    A 20 percent pickoff feeds a defocused low-order camera; the loop
+    integrates the response-matrix reconstruction onto a tip/tilt/focus
+    corrector while the science arm is scored on an off-axis ring where
+    jitter leaks light.
+
+    Args:
+        npix: Pupil sampling.
+        n_steps: Frames.
+        sensor_defocus_nm: Static defocus bias on the sensor arm (0 makes
+            focus invisible at first order -- the physics the bias exists for).
+
+    Returns:
+        A ``Scenario`` (regime ``pointing``).
+    """
+    system, input_field, mask = _pointing_system(npix, sensor_defocus_nm)
+    return Scenario(
+        regime="pointing",
+        params=dict(
+            system=system,
+            input_field=input_field,
+            corrector_stage="fsm",
+            drift_stage="jitter",
+            sense="lowfs",
+            science="sci",
+            mask=mask,
+            drift_table=_ramp(n_steps, 3, 0.5),
+            n_steps=n_steps,
+            gain=0.6,
+            regularization=1e-9,
         ),
     )

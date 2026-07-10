@@ -33,6 +33,7 @@ from tiptilt.control import (
     close_dark_hole,
 )
 from tiptilt.dm import DeformableMirror, dm_influence_basis
+from tiptilt.lowfs import lowfs_calibrate, run_pointing_loop
 from tiptilt.maintenance import maintain_dark_hole, make_detector
 from tiptilt.multichannel import (
     FeedForwardController,
@@ -68,6 +69,7 @@ from tiptilt.testbed import (
     hold_against_drift,
     ncpa_limited,
     one_dm_vs_two_dm,
+    pointing_jitter,
     run,
     sweep,
     wfs_plus_science,
@@ -107,14 +109,17 @@ __all__ = [
     "estimate_field_pairwise",
     "frozen_flow_sequence",
     "hold_against_drift",
+    "lowfs_calibrate",
     "maintain_dark_hole",
     "make_detector",
     "ncpa_limited",
     "one_dm_vs_two_dm",
     "pairwise_estimate",
+    "pointing_jitter",
     "probe_set",
     "run",
     "run_multichannel",
+    "run_pointing_loop",
     "shared_dm_command",
     "sweep",
     "von_karman_screen",
