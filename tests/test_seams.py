@@ -13,13 +13,13 @@ from physicaloptix import (
     Stage,
 )
 
-from wavefronts.control import (
+from tiptilt.control import (
     DarkZoneModel,
     EFCController,
     PredictiveController,
     StrokeMinController,
 )
-from wavefronts.sensing import KalmanEstimator, OracleEstimator
+from tiptilt.sensing import KalmanEstimator, OracleEstimator
 
 WL = 500.0
 _KS = [(3, 1), (3, 0), (3, 2), (2, 1), (4, 1), (3, -1)]

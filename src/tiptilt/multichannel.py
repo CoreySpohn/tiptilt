@@ -29,7 +29,7 @@ import jax.numpy as jnp
 from jaxtyping import Array
 from physicaloptix import PhaseScreen, linearize_shared
 
-from wavefronts.control import AbstractController
+from tiptilt.control import AbstractController
 
 
 def _stage_index(path, name, context):

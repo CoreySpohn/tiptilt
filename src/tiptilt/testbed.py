@@ -39,15 +39,15 @@ from physicaloptix import (
     Stage,
 )
 
-from wavefronts.control import (
+from tiptilt.control import (
     DarkZoneModel,
     EFCController,
     PredictiveController,
     StrokeMinController,
 )
-from wavefronts.maintenance import maintain_dark_hole
-from wavefronts.multichannel import run_multichannel
-from wavefronts.sensing import (
+from tiptilt.maintenance import maintain_dark_hole
+from tiptilt.multichannel import run_multichannel
+from tiptilt.sensing import (
     KalmanEstimator,
     OracleEstimator,
     PairwiseEstimator,
@@ -368,7 +368,7 @@ def dig_from_cold(npix=16, n_steps=15, stroke_cap_nm=None, actuator_dm=False):
     grid, xg, yg, aperture = _aperture(npix)
     focal = Grid.focal(32, 0.5)
     if actuator_dm:
-        from wavefronts.dm import DeformableMirror
+        from tiptilt.dm import DeformableMirror
 
         device = DeformableMirror.build(
             grid, n_actuators=max(12, npix // 2), wavelength_nm=WL
@@ -498,7 +498,7 @@ def hold_against_drift(npix=16, n_steps=12):
     Returns:
         A ``Scenario`` (regime ``maintain``) with the dug ``command0``.
     """
-    from wavefronts.control import close_dark_hole
+    from tiptilt.control import close_dark_hole
 
     grid, _xg, _yg, aperture = _aperture(npix)
     focal = Grid.focal(32, 0.5)

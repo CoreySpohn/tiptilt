@@ -5,7 +5,7 @@ import numpy as np
 from physicaloptix import Field, Grid, PlaneKind, ZernikeWavefrontSensor, zernike_basis
 from physicaloptix.elements.basis import ModeBasis
 
-from wavefronts.sensing import zwfs_calibrate, zwfs_reconstruct
+from tiptilt.sensing import zwfs_calibrate, zwfs_reconstruct
 
 WL = 500.0
 NPUP = 48

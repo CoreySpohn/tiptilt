@@ -15,9 +15,9 @@ from physicaloptix import (
     Stage,
 )
 
-from wavefronts.control import close_dark_hole
-from wavefronts.maintenance import maintain_dark_hole, make_detector
-from wavefronts.sensing import probe_set
+from tiptilt.control import close_dark_hole
+from tiptilt.maintenance import maintain_dark_hole, make_detector
+from tiptilt.sensing import probe_set
 
 WL = 500.0
 _KS = [(3, 1), (3, 0), (2, 1), (4, 1)]

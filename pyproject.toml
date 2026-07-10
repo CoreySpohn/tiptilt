@@ -3,7 +3,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "wavefronts"
+name = "tiptilt"
 version = "0.0.1"
 description = "Differentiable wavefront-error generation and wavefront control for the HWO direct imaging simulation suite"
 authors = [{ name = "Corey Spohn", email = "corey.a.spohn@nasa.gov" }]
@@ -50,7 +50,7 @@ convention = "google"
 "tests/**" = ["D"]
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/wavefronts"]
+packages = ["src/tiptilt"]
 
 [dependency-groups]
 dev = [

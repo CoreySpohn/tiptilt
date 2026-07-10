@@ -13,8 +13,8 @@ from physicaloptix import (
     Stage,
 )
 
-from wavefronts.control import close_dark_hole
-from wavefronts.dm import DeformableMirror, dm_influence_basis
+from tiptilt.control import close_dark_hole
+from tiptilt.dm import DeformableMirror, dm_influence_basis
 
 WL = 500.0
 

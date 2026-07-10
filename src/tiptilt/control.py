@@ -9,7 +9,7 @@ The control problem factors onto two symmetric seams sharing one currency:
 - ``AbstractController``: ``command_delta(estimate) -> (new_self, delta)``.
   Stateless laws (EFC / stroke minimization) return themselves unchanged;
   stateful ones (a predictive AR feed-forward) advance their state.
-- ``AbstractEstimator`` (in ``wavefronts.sensing``): ``estimate(model,
+- ``AbstractEstimator`` (in ``tiptilt.sensing``): ``estimate(model,
   command, key) -> (new_self, e_hat)``, the measurement half.
 
 ``close_dark_hole`` is a thin driver over these seams: the oracle loop is a
@@ -25,7 +25,7 @@ import jax.numpy as jnp
 from jaxtyping import Array
 from physicaloptix import PhaseScreen
 
-from wavefronts.sensing import KalmanEstimator, PairwiseEstimator
+from tiptilt.sensing import KalmanEstimator, PairwiseEstimator
 
 
 def _dm_coeffs(path, dm_index):
@@ -414,7 +414,7 @@ def close_dark_hole(
     default ``"oracle"`` reads the true field by re-propagation (perfect
     knowledge, the achievable-contrast reference). ``"pairwise"`` instead
     estimates the field from probe images (see
-    :func:`wavefronts.sensing.estimate_field_pairwise`), the hardware-realistic
+    :func:`tiptilt.sensing.estimate_field_pairwise`), the hardware-realistic
     loop: it builds the control Jacobian on the ``model_field`` and floors on the
     model mismatch rather than digging arbitrarily deep. A chromatic
     ``input_field`` drives a BROADBAND estimated loop by sub-band probing: the
@@ -443,7 +443,7 @@ def close_dark_hole(
         model_field: Design entrance field (no aberration) for the ``"pairwise"``
             control Jacobian and probe model; defaults to ``input_field``.
         probes: Probe command vectors for the probe deformable mirror (required
-            for ``"pairwise"``; see :func:`wavefronts.sensing.probe_set`).
+            for ``"pairwise"``; see :func:`tiptilt.sensing.probe_set`).
         probe_dm: Stage index of the probe deformable mirror; defaults to the
             first of ``dm_indices``.
         detector: Optional ``callable(image, key) -> image`` applying measurement

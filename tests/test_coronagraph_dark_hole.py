@@ -23,7 +23,7 @@ from physicaloptix import (
 )
 from physicaloptix.elements import SampledOptic
 
-from wavefronts import close_dark_hole, probe_set
+from tiptilt import close_dark_hole, probe_set
 
 WL = 500.0
 NPUP = 48

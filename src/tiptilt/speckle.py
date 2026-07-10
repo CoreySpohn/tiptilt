@@ -1,4 +1,4 @@
-"""The wavefronts speckle-field family: aberration realizations as residuals.
+"""The tiptilt speckle-field family: aberration realizations as residuals.
 
 These implement optixstuff's ``AbstractSpeckleField`` on top of the
 ``(E_nom, G)`` linearization a propagation engine provides, differing only in

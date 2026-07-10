@@ -6,7 +6,7 @@ import numpy as np
 import pytest
 from physicaloptix import ChannelLinearization, MultiChannelLinearization
 
-from wavefronts.speckle import TabulatedSpeckleField, correlated_channel_fields
+from tiptilt.speckle import TabulatedSpeckleField, correlated_channel_fields
 
 NPIX, M_SHARED = 8, 3
 

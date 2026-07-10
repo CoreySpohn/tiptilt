@@ -25,8 +25,8 @@ import jax
 import jax.numpy as jnp
 from physicaloptix import PhaseScreen, read_detector
 
-from wavefronts.control import DarkZoneModel, EFCController
-from wavefronts.sensing import KalmanEstimator, OracleEstimator, PairwiseEstimator
+from tiptilt.control import DarkZoneModel, EFCController
+from tiptilt.sensing import KalmanEstimator, OracleEstimator, PairwiseEstimator
 
 
 def make_detector(

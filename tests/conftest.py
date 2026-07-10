@@ -1,4 +1,4 @@
-"""Shared fixtures for wavefronts tests."""
+"""Shared fixtures for tiptilt tests."""
 
 from hwoutils import enable_x64, set_platform
 

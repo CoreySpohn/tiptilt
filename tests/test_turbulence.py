@@ -4,7 +4,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from wavefronts.turbulence import frozen_flow_sequence, von_karman_screen
+from tiptilt.turbulence import frozen_flow_sequence, von_karman_screen
 
 WL = 500.0
 

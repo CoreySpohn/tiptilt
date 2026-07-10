@@ -18,7 +18,7 @@ from physicaloptix import (
     linearize_shared,
 )
 
-from wavefronts.multichannel import (
+from tiptilt.multichannel import (
     FeedForwardController,
     MultiChannelModel,
     run_multichannel,

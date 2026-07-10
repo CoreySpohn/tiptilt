@@ -1,4 +1,4 @@
-"""Tests for the wavefronts speckle-field family."""
+"""Tests for the tiptilt speckle-field family."""
 
 import jax
 import jax.numpy as jnp
@@ -6,7 +6,7 @@ import numpy as np
 import pytest
 from optixstuff.speckle import AbstractSpeckleField
 
-from wavefronts.speckle import (
+from tiptilt.speckle import (
     TabulatedSpeckleField,
     _draw_correlated_spectrum,
     correlated_drift_field,

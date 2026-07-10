@@ -1,4 +1,4 @@
-"""wavefronts -- differentiable wavefront-error generation and control.
+"""tiptilt -- differentiable wavefront-error generation and control.
 
 A downstream consumer of physicaloptix (the differentiable propagation engine)
 and optixstuff (the hardware and speckle-field contracts), parallel to
@@ -21,10 +21,10 @@ resulting residual through the speckle seam, so the image and yield layers pick
 it up without any change. Space wavefront control is the priority; atmospheric
 turbulence shares the loop, the mode basis, and the residual interface.
 
-The distribution name is a working placeholder and may change before release.
+Named for tip and tilt, the humblest wavefront correction.
 """
 
-from wavefronts.control import (
+from tiptilt.control import (
     AbstractController,
     DarkZoneModel,
     EFCController,
@@ -32,15 +32,15 @@ from wavefronts.control import (
     StrokeMinController,
     close_dark_hole,
 )
-from wavefronts.dm import DeformableMirror, dm_influence_basis
-from wavefronts.maintenance import maintain_dark_hole, make_detector
-from wavefronts.multichannel import (
+from tiptilt.dm import DeformableMirror, dm_influence_basis
+from tiptilt.maintenance import maintain_dark_hole, make_detector
+from tiptilt.multichannel import (
     FeedForwardController,
     MultiChannelModel,
     run_multichannel,
     shared_dm_command,
 )
-from wavefronts.sensing import (
+from tiptilt.sensing import (
     AbstractEstimator,
     KalmanEstimator,
     KalmanFieldEstimator,
@@ -52,12 +52,12 @@ from wavefronts.sensing import (
     zwfs_calibrate,
     zwfs_reconstruct,
 )
-from wavefronts.speckle import (
+from tiptilt.speckle import (
     TabulatedSpeckleField,
     correlated_channel_fields,
     correlated_drift_field,
 )
-from wavefronts.testbed import (
+from tiptilt.testbed import (
     ALGORITHMS,
     Metrics,
     RunResult,
@@ -73,7 +73,7 @@ from wavefronts.testbed import (
     wfs_plus_science,
     wfs_private_aliasing,
 )
-from wavefronts.turbulence import frozen_flow_sequence, von_karman_screen
+from tiptilt.turbulence import frozen_flow_sequence, von_karman_screen
 
 __version__ = "0.0.1"
 

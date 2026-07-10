@@ -4,7 +4,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from wavefronts.testbed import (
+from tiptilt.testbed import (
     ALGORITHMS,
     compute_metrics,
     dig_from_cold,
@@ -112,7 +112,7 @@ class TestSweep:
 class TestUserExtension:
     @pytest.mark.slow
     def test_actuator_dm_scenario_runs_in_actuator_space(self):
-        from wavefronts.dm import DeformableMirror  # noqa: F401 (the device path)
+        from tiptilt.dm import DeformableMirror  # noqa: F401 (the device path)
 
         scenario = dig_from_cold(npix=24, actuator_dm=True)
         result = run(scenario, "oracle-efc")
@@ -127,7 +127,7 @@ class TestUserExtension:
         import equinox as eqx
         import jax.numpy as jnp
 
-        from wavefronts.control import AbstractController, EFCController
+        from tiptilt.control import AbstractController, EFCController
 
         class LeakyIntegratorEFC(AbstractController):
             """EFC with a leaky-integrator memory (a genuinely stateful law)."""

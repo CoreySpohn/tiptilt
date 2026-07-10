@@ -24,8 +24,8 @@ jax.config.update("jax_enable_x64", True)  # deep contrast needs float64
 
 import jax.numpy as jnp  # noqa: E402
 
-from wavefronts.control import AbstractController, EFCController  # noqa: E402
-from wavefronts.testbed import ALGORITHMS, dig_from_cold, run, sweep  # noqa: E402
+from tiptilt.control import AbstractController, EFCController  # noqa: E402
+from tiptilt.testbed import ALGORITHMS, dig_from_cold, run, sweep  # noqa: E402
 
 
 class LeakyIntegratorEFC(AbstractController):
