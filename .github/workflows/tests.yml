@@ -31,11 +31,11 @@ jobs:
       env:
         VIRTUAL_ENV: ${{ github.workspace }}/.venv
 
-    # The main branches carry contract pieces newer than the PyPI releases
-    # (multi-path modules in physicaloptix, the speckle-field contract in
-    # optixstuff); drop each override once a release includes it.
+    # optixstuff main carries the speckle-field contract this package
+    # imports; drop the override once optixstuff >= 2.0.0 is on PyPI.
+    # (physicaloptix override dropped 2026-07-17: 0.1.0 released.)
     - name: Override unreleased dependencies from git main
-      run: uv pip install "physicaloptix @ git+https://github.com/CoreySpohn/physicaloptix.git" "optixstuff @ git+https://github.com/CoreySpohn/optixstuff.git"
+      run: uv pip install "optixstuff @ git+https://github.com/CoreySpohn/optixstuff.git"
       env:
         VIRTUAL_ENV: ${{ github.workspace }}/.venv
 
