@@ -19,6 +19,7 @@ stroke limits live on the device (``clip``) and as the harness stroke cap.
 """
 
 import equinox as eqx
+import jax
 import jax.numpy as jnp
 import numpy as np
 from jaxtyping import Array
@@ -75,6 +76,123 @@ def dm_influence_basis(grid, *, n_actuators, coupling=0.15, margin_actuators=1.0
     return basis, jnp.asarray(centers)
 
 
+@jax.custom_jvp
+def _round_straight_through(x):
+    """``round(x)`` whose gradient is the identity (straight-through).
+
+    The true derivative of rounding is zero almost everywhere, which would
+    silently null every Jacobian column built by differentiating through a
+    quantized mirror. The straight-through convention keeps the model
+    Jacobian at the ideal slope -- exactly what a linearized controller
+    assumes about its DAC -- while the staircase still bites in every
+    propagated image.
+    """
+    return jnp.round(x)
+
+
+@_round_straight_through.defjvp
+def _round_straight_through_jvp(primals, tangents):
+    (x,) = primals
+    (t,) = tangents
+    return jnp.round(x), t
+
+
+class HardwareDM(PhaseScreen):
+    """A deformable mirror that realizes its command imperfectly.
+
+    A drop-in ``PhaseScreen``: every driver, estimator, and ``jacfwd``-built
+    Jacobian accepts it unchanged (the ``isinstance`` seams see a
+    ``PhaseScreen``). At propagation time the commanded coefficients pass
+    through the hardware transfer before becoming an OPD::
+
+        realized = gains * quantize(command) + offsets
+
+    - ``dac_step_nm``: DAC least-significant-bit quantization (straight-
+      through gradient, so model Jacobians keep the ideal slope while every
+      image sees the staircase). Probe amplitudes must exceed the step or
+      pairwise probing loses its signal -- real hardware physics.
+    - ``actuator_gains``: per-actuator response (1 = perfect, 0 = dead).
+      Gains flow into ``jacfwd`` Jacobians, so the model is gain-CALIBRATED:
+      dead columns vanish and Tikhonov-regularized control works around
+      them. An uncalibrated (model does not know) device needs a model-path
+      vs truth-path split, which is a driver seam, not a device property.
+    - ``actuator_offsets_nm``: additive surface offsets; a stuck actuator is
+      gain 0 plus its stuck value here.
+
+    Attributes:
+        actuator_gains: Optional ``(n_modes,)`` response gains.
+        actuator_offsets_nm: Optional ``(n_modes,)`` additive offsets in nm.
+        dac_step_nm: Optional DAC step in nm (``None`` = continuous).
+    """
+
+    actuator_gains: Array | None
+    actuator_offsets_nm: Array | None
+    dac_step_nm: float | None = eqx.field(static=True)
+
+    def __init__(
+        self,
+        basis,
+        grid,
+        *,
+        wavelength_nm,
+        plane=PlaneKind.PUPIL,
+        actuator_gains=None,
+        actuator_offsets_nm=None,
+        dac_step_nm=None,
+    ):
+        """Build the imperfect mirror.
+
+        Args:
+            basis: The influence-function ``ModeBasis`` (coeffs = command).
+            grid: The pupil ``Grid``.
+            wavelength_nm: Design wavelength of the phase screen.
+            plane: The plane the mirror sits in.
+            actuator_gains: Optional per-actuator response gains.
+            actuator_offsets_nm: Optional per-actuator offsets in nm.
+            dac_step_nm: Optional DAC quantization step in nm.
+        """
+        super().__init__(basis, grid, wavelength_nm=wavelength_nm, plane=plane)
+        self.actuator_gains = (
+            None if actuator_gains is None else jnp.asarray(actuator_gains)
+        )
+        self.actuator_offsets_nm = (
+            None if actuator_offsets_nm is None else jnp.asarray(actuator_offsets_nm)
+        )
+        self.dac_step_nm = None if dac_step_nm is None else float(dac_step_nm)
+
+    def __check_init__(self):
+        """Validate the hardware fields against the basis."""
+        if self.dac_step_nm is not None and self.dac_step_nm <= 0.0:
+            raise ValueError(f"dac_step_nm must be positive, got {self.dac_step_nm}")
+        n_modes = self.basis.B.shape[0]
+        for name, values in (
+            ("actuator_gains", self.actuator_gains),
+            ("actuator_offsets_nm", self.actuator_offsets_nm),
+        ):
+            if values is not None and values.shape != (n_modes,):
+                raise ValueError(
+                    f"{name} must have shape ({n_modes},), got {tuple(values.shape)}"
+                )
+
+    def realized_command(self):
+        """The command the hardware actually applies, in nm."""
+        command = self.basis.coeffs
+        if self.dac_step_nm is not None:
+            command = self.dac_step_nm * _round_straight_through(
+                command / self.dac_step_nm
+            )
+        if self.actuator_gains is not None:
+            command = self.actuator_gains * command
+        if self.actuator_offsets_nm is not None:
+            command = command + self.actuator_offsets_nm
+        return command
+
+    def __call__(self, field):
+        """Apply the phase of the REALIZED (not commanded) surface."""
+        realized = eqx.tree_at(lambda s: s.basis.coeffs, self, self.realized_command())
+        return PhaseScreen.__call__(realized, field)
+
+
 class DeformableMirror(eqx.Module):
     """A programmable actuator-grid mirror, ready to drop into a path.
 
@@ -110,6 +228,9 @@ class DeformableMirror(eqx.Module):
         margin_actuators=1.0,
         stroke_limit_nm=None,
         plane=PlaneKind.PUPIL,
+        dac_step_nm=None,
+        actuator_gains=None,
+        actuator_offsets_nm=None,
     ):
         """Build the device on a pupil grid.
 
@@ -123,6 +244,11 @@ class DeformableMirror(eqx.Module):
             stroke_limit_nm: Optional per-actuator OPD limit.
             plane: The plane the mirror sits in (an out-of-pupil mirror uses
                 ``PlaneKind.INTERMEDIATE`` behind a Fresnel relay).
+            dac_step_nm: Optional DAC quantization step in nm; any hardware
+                knob makes ``screen`` a ``HardwareDM``.
+            actuator_gains: Optional per-actuator response gains (0 = dead).
+            actuator_offsets_nm: Optional per-actuator offsets in nm (a
+                stuck actuator is gain 0 plus its value here).
 
         Returns:
             A ``DeformableMirror``.
@@ -133,7 +259,22 @@ class DeformableMirror(eqx.Module):
             coupling=coupling,
             margin_actuators=margin_actuators,
         )
-        screen = PhaseScreen(basis, grid, wavelength_nm=wavelength_nm, plane=plane)
+        if (
+            dac_step_nm is None
+            and actuator_gains is None
+            and actuator_offsets_nm is None
+        ):
+            screen = PhaseScreen(basis, grid, wavelength_nm=wavelength_nm, plane=plane)
+        else:
+            screen = HardwareDM(
+                basis,
+                grid,
+                wavelength_nm=wavelength_nm,
+                plane=plane,
+                actuator_gains=actuator_gains,
+                actuator_offsets_nm=actuator_offsets_nm,
+                dac_step_nm=dac_step_nm,
+            )
         return cls(
             screen=screen,
             centers=centers,
@@ -172,4 +313,4 @@ class DeformableMirror(eqx.Module):
         return jnp.tensordot(command, self.screen.basis.B, axes=1)
 
 
-__all__ = ["DeformableMirror", "dm_influence_basis"]
+__all__ = ["DeformableMirror", "HardwareDM", "dm_influence_basis"]

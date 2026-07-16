@@ -151,3 +151,149 @@ class TestDeformableMirror:
         # cannot exactly reproduce a Fourier cosine), so the floor sits at
         # the representation residual rather than machine depth.
         assert float(history[-1]) < 0.1 * float(history[0])
+
+
+def _pupil_setup(npix=24, n_actuators=8, **hardware):
+    grid = Grid.pupil(npix)
+    device = DeformableMirror.build(
+        grid, n_actuators=n_actuators, wavelength_nm=WL, **hardware
+    )
+    x = np.asarray(grid.coords)
+    xg, yg = np.meshgrid(x, x)
+    aperture = (xg**2 + yg**2 <= 0.25).astype(complex)
+    field = Field(data=jnp.asarray(aperture), grid=grid, plane=PlaneKind.PUPIL)
+    return grid, device, field
+
+
+class TestHardwareDM:
+    def test_ideal_hardware_matches_phase_screen(self):
+        from tiptilt.dm import HardwareDM
+
+        grid, device, field = _pupil_setup()
+        ideal = device.screen  # plain PhaseScreen when no knobs are set
+        assert type(ideal) is PhaseScreen
+        hardware = HardwareDM(ideal.basis, grid, wavelength_nm=WL)  # knobs all default
+        command = jnp.linspace(-3.0, 3.0, device.n_active)
+        set_ideal = eqx_set(ideal, command)
+        set_hw = eqx_set(hardware, command)
+        assert jnp.allclose(set_hw(field).data, set_ideal(field).data)
+
+    def test_quantization_staircase(self):
+        _grid, device, field = _pupil_setup(dac_step_nm=2.0)
+        screen = device.screen
+        n = device.n_active
+        sub_lsb = eqx_set(screen, jnp.full(n, 0.9))  # below step/2 -> rounds to 0
+        flat = eqx_set(screen, jnp.zeros(n))
+        assert jnp.allclose(sub_lsb(field).data, flat(field).data)
+        one_step = eqx_set(screen, jnp.full(n, 1.4))  # rounds to 2.0
+        exact = eqx_set(screen, jnp.full(n, 2.0))
+        # quantized 1.4 nm command == exactly-2 nm command, != flat
+        ideal_two = PhaseScreen(
+            eqx_coeffs(screen.basis, jnp.full(n, 2.0)), _grid, wavelength_nm=WL
+        )
+        assert jnp.allclose(one_step(field).data, ideal_two(field).data)
+        assert not jnp.allclose(one_step(field).data, flat(field).data)
+        del exact
+
+    def test_jacobian_stays_ideal_through_quantizer(self):
+        from tiptilt.control import DarkZoneModel
+
+        grid, device, field = _pupil_setup(dac_step_nm=2.0)
+        _g2, ideal_dev, _f2 = _pupil_setup()
+        focal = Grid.focal(32, 0.5)
+        fx = np.asarray(focal.coords)
+        fxg, fyg = np.meshgrid(fx, fx)
+        mask = jnp.asarray((np.abs(fxg - 3.0) < 0.8) & (np.abs(fyg) < 0.8))
+
+        def model_for(screen):
+            path = OpticalPath(
+                stages=(
+                    Stage("dm", screen),
+                    Stage("science", Fraunhofer(grid_in=grid, grid_out=focal)),
+                )
+            )
+            return DarkZoneModel.build(path, 0, mask, jacobian_field=field)
+
+        g_hw = model_for(device.screen).g_dz
+        g_ideal = model_for(ideal_dev.screen).g_dz
+        assert jnp.allclose(g_hw, g_ideal, atol=1e-12)
+
+    def test_dead_actuator_ignores_command_and_zeroes_jacobian(self):
+        from tiptilt.control import DarkZoneModel
+
+        n_probe = DeformableMirror.build(
+            Grid.pupil(24), n_actuators=8, wavelength_nm=WL
+        ).n_active
+        gains = jnp.ones(n_probe).at[3].set(0.0)
+        grid, device, field = _pupil_setup(actuator_gains=gains)
+        poke_dead = eqx_set(device.screen, jnp.zeros(n_probe).at[3].set(50.0))
+        flat = eqx_set(device.screen, jnp.zeros(n_probe))
+        assert jnp.allclose(poke_dead(field).data, flat(field).data)
+
+        focal = Grid.focal(32, 0.5)
+        fx = np.asarray(focal.coords)
+        fxg, fyg = np.meshgrid(fx, fx)
+        mask = jnp.asarray((np.abs(fxg - 3.0) < 0.8) & (np.abs(fyg) < 0.8))
+        path = OpticalPath(
+            stages=(
+                Stage("dm", device.screen),
+                Stage("science", Fraunhofer(grid_in=grid, grid_out=focal)),
+            )
+        )
+        model = DarkZoneModel.build(path, 0, mask, jacobian_field=field)
+        col = model.g_dz[:, 3]
+        others = jnp.delete(model.g_dz, 3, axis=1)
+        assert float(jnp.max(jnp.abs(col))) < 1e-14 * float(jnp.max(jnp.abs(others)))
+
+    def test_stuck_actuator_offset_applies_without_command(self):
+        n = DeformableMirror.build(
+            Grid.pupil(24), n_actuators=8, wavelength_nm=WL
+        ).n_active
+        offsets = jnp.zeros(n).at[5].set(30.0)
+        grid, device, field = _pupil_setup(
+            actuator_gains=jnp.ones(n).at[5].set(0.0), actuator_offsets_nm=offsets
+        )
+        flat_cmd = eqx_set(device.screen, jnp.zeros(n))
+        ideal = PhaseScreen(
+            eqx_coeffs(device.screen.basis, offsets), grid, wavelength_nm=WL
+        )
+        assert jnp.allclose(flat_cmd(field).data, ideal(field).data)
+        # commanding the stuck actuator changes nothing
+        poke_stuck = eqx_set(device.screen, jnp.zeros(n).at[5].set(80.0))
+        assert jnp.allclose(poke_stuck(field).data, flat_cmd(field).data)
+
+    def test_validation_errors(self):
+        with pytest.raises(ValueError, match="dac_step_nm"):
+            _pupil_setup(dac_step_nm=-1.0)
+        with pytest.raises(ValueError, match="actuator_gains"):
+            _pupil_setup(actuator_gains=jnp.ones(3))
+
+
+class TestHardwareScenarios:
+    def test_quantization_floor_ordering(self):
+        from tiptilt.testbed import hardware_dm, run
+
+        continuous = run(hardware_dm(), "oracle-efc").metrics.final_contrast
+        fine = run(hardware_dm(dac_step_nm=0.5), "oracle-efc").metrics.final_contrast
+        coarse = run(hardware_dm(dac_step_nm=3.0), "oracle-efc").metrics.final_contrast
+        assert continuous < fine < coarse
+
+    def test_stuck_actuator_still_digs(self):
+        from tiptilt.testbed import hardware_dm, run
+
+        result = run(hardware_dm(stuck_nm=40.0), "oracle-efc")
+        open_loop = run(hardware_dm(stuck_nm=40.0), "open-loop")
+        assert result.metrics.final_contrast < 0.3 * result.metrics.initial_contrast
+        assert result.metrics.final_contrast < 0.3 * open_loop.metrics.final_contrast
+
+
+def eqx_set(screen, command):
+    import equinox as eqx
+
+    return eqx.tree_at(lambda s: s.basis.coeffs, screen, jnp.asarray(command))
+
+
+def eqx_coeffs(basis, coeffs):
+    from physicaloptix import ModeBasis
+
+    return ModeBasis(B=basis.B, coeffs=jnp.asarray(coeffs))

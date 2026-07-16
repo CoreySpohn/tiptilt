@@ -809,3 +809,91 @@ def pointing_jitter(npix=16, n_steps=8, sensor_defocus_nm=25.0):
             regularization=1e-9,
         ),
     )
+
+
+def hardware_dm(npix=16, n_steps=12, dac_step_nm=None, n_dead=0, stuck_nm=None):
+    """Dig against DM hardware honesty: DAC steps, dead and stuck actuators.
+
+    The dig-from-cold configuration on an actuator-grid ``DeformableMirror``
+    whose command passes through the hardware transfer. Quantization sets a
+    contrast floor no controller can pass (the model Jacobian keeps the
+    ideal slope via the straight-through convention; the images see the
+    staircase). Dead actuators zero their Jacobian columns -- the
+    gain-calibrated model -- so regularized control digs around them. A
+    stuck actuator is a static speckle source the live actuators must
+    cancel. Probe amplitudes sit above any sensible ``dac_step_nm``; probing
+    below the LSB is a real hardware failure mode, not a harness bug.
+
+    Args:
+        npix: Pupil sampling.
+        n_steps: Control iterations.
+        dac_step_nm: DAC quantization step in nm (``None`` = continuous).
+        n_dead: Number of dead (gain-zero) actuators, spread over the grid.
+        stuck_nm: If set, one central actuator is stuck at this value in nm.
+
+    Returns:
+        A ``Scenario`` (regime ``dig``).
+    """
+    from tiptilt.dm import DeformableMirror
+
+    grid, xg, yg, aperture = _aperture(npix)
+    focal = Grid.focal(32, 0.5)
+    n_actuators = max(12, npix // 2)
+    n_active = DeformableMirror.build(
+        grid, n_actuators=n_actuators, wavelength_nm=WL
+    ).n_active
+
+    gains = None
+    offsets = None
+    if n_dead:
+        dead = np.linspace(0, n_active - 1, n_dead, dtype=int)
+        gains = jnp.ones(n_active).at[jnp.asarray(dead)].set(0.0)
+    if stuck_nm is not None:
+        stuck = n_active // 2
+        gains = (jnp.ones(n_active) if gains is None else gains).at[stuck].set(0.0)
+        offsets = jnp.zeros(n_active).at[stuck].set(float(stuck_nm))
+
+    device = DeformableMirror.build(
+        grid,
+        n_actuators=n_actuators,
+        wavelength_nm=WL,
+        dac_step_nm=dac_step_nm,
+        actuator_gains=gains,
+        actuator_offsets_nm=offsets,
+    )
+    path = OpticalPath(
+        stages=(
+            Stage("dm", device.screen),
+            Stage("science", Fraunhofer(grid_in=grid, grid_out=focal)),
+        )
+    )
+    opd = 3.0 * np.cos(2 * np.pi * (3 * xg + yg))
+    input_field = Field(
+        data=jnp.asarray(aperture * np.exp(1j * 2 * np.pi * opd / WL)),
+        grid=grid,
+        plane=PlaneKind.PUPIL,
+    )
+    model_field = Field(
+        data=jnp.asarray(aperture).astype(complex), grid=grid, plane=PlaneKind.PUPIL
+    )
+    fx = np.asarray(focal.coords)
+    fxg, fyg = np.meshgrid(fx, fx)
+    mask = jnp.asarray((np.abs(fxg - 3.0) < 0.6) & (np.abs(fyg - 1.0) < 0.8))
+    out, _ = path.propagate(input_field)
+    initial = float(jnp.mean(jnp.abs(out.data[mask]) ** 2))
+    return Scenario(
+        regime="dig",
+        params=dict(
+            path=path,
+            input_field=input_field,
+            model_field=model_field,
+            dm_indices=0,
+            mask=mask,
+            n_steps=n_steps,
+            gain=0.6,
+            regularization=1e-8,
+            probes=probe_set(device.screen.basis, amplitude_nm=2.0, n_probes=3),
+            probe_dm=0,
+            target_contrast=0.05 * initial,
+        ),
+    )

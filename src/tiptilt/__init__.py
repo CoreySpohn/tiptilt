@@ -32,7 +32,7 @@ from tiptilt.control import (
     StrokeMinController,
     close_dark_hole,
 )
-from tiptilt.dm import DeformableMirror, dm_influence_basis
+from tiptilt.dm import DeformableMirror, HardwareDM, dm_influence_basis
 from tiptilt.lowfs import lowfs_calibrate, run_pointing_loop
 from tiptilt.maintenance import maintain_dark_hole, make_detector
 from tiptilt.multichannel import (
@@ -66,6 +66,7 @@ from tiptilt.testbed import (
     compute_metrics,
     dig_from_cold,
     dual_science_common_mode,
+    hardware_dm,
     hold_against_drift,
     ncpa_limited,
     one_dm_vs_two_dm,
@@ -87,6 +88,7 @@ __all__ = [
     "DeformableMirror",
     "EFCController",
     "FeedForwardController",
+    "HardwareDM",
     "KalmanEstimator",
     "KalmanFieldEstimator",
     "Metrics",
@@ -108,6 +110,7 @@ __all__ = [
     "dual_science_common_mode",
     "estimate_field_pairwise",
     "frozen_flow_sequence",
+    "hardware_dm",
     "hold_against_drift",
     "lowfs_calibrate",
     "maintain_dark_hole",
