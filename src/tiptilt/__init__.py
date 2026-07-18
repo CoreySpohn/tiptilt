@@ -34,7 +34,11 @@ from tiptilt.control import (
 )
 from tiptilt.dm import DeformableMirror, HardwareDM, dm_influence_basis
 from tiptilt.lowfs import lowfs_calibrate, run_pointing_loop
-from tiptilt.maintenance import maintain_dark_hole, make_detector
+from tiptilt.maintenance import (
+    maintain_dark_hole,
+    maintained_residual_field,
+    make_detector,
+)
 from tiptilt.multichannel import (
     FeedForwardController,
     MultiChannelModel,
@@ -114,6 +118,7 @@ __all__ = [
     "hold_against_drift",
     "lowfs_calibrate",
     "maintain_dark_hole",
+    "maintained_residual_field",
     "make_detector",
     "ncpa_limited",
     "one_dm_vs_two_dm",
