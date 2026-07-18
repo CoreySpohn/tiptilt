@@ -24,6 +24,7 @@ turbulence shares the loop, the mode basis, and the residual interface.
 Named for tip and tilt, the humblest wavefront correction.
 """
 
+from tiptilt._version import __version__
 from tiptilt.control import (
     AbstractController,
     DarkZoneModel,
@@ -81,8 +82,6 @@ from tiptilt.testbed import (
     wfs_private_aliasing,
 )
 from tiptilt.turbulence import frozen_flow_sequence, von_karman_screen
-
-__version__ = "0.0.1"
 
 __all__ = [
     "ALGORITHMS",
