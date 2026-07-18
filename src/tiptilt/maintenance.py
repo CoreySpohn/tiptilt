@@ -267,6 +267,14 @@ def maintained_residual_field(
     interfere with the static floor, which is the statistics that matter
     there.
 
+    Export about a SETTLED operating point: dig, then run this same
+    maintenance loop drift-free until it sits at its own regularized fixed
+    point, and pass that command as ``command0``. A merely-dug operating
+    point leaves a large drift-independent transient in the trajectory (the
+    controller jumping from the dig's fixed point to its own, since the loop
+    re-linearizes about ``command0``), and that excursion is exactly what
+    the linearized export cannot represent.
+
     Args:
         path: The ``OpticalPath`` containing drift screen and mirrors.
         input_field: The true entrance field.
