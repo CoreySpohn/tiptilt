@@ -28,7 +28,8 @@ import jax.numpy as jnp
 import numpy as np
 from jaxtyping import Array
 from optixstuff.speckle import AbstractSpeckleField
-from physicaloptix import AnalyticSpeckleField
+from physicaloptix import AnalyticSpeckleField, lambda_scaled_channels
+from physicaloptix.speckle import _check_chromatic_layout, _select_channel
 
 J2000_JD = 2451545.0
 
@@ -277,17 +278,24 @@ class TabulatedSpeckleField(AbstractSpeckleField):
     numerically stable form of ``|E_nom + G eps|^2 - |E_nom|^2`` (it avoids
     subtracting two floor-magnitude numbers), and needs the complex ``E_nom``.
 
-    Monochromatic in v1: ``realize`` ignores ``wavelength_nm`` (kept for
-    interface conformance). The cross term needs float64 inputs.
+    Monochromatic by default: ``realize`` then ignores ``wavelength_nm``.
+    With ``wavelengths_nm`` set, ``e_nom`` / ``G`` (and optionally
+    ``normalization``) carry a leading channel axis and ``realize`` selects
+    the channel nearest the requested wavelength; the tabulated trajectory
+    stays shared across channels (a wavefront error in nanometres is
+    achromatic). Build the stacks per sub-band for an exact model, or via
+    :meth:`broadened` for the lambda-scaling approximation. The cross term
+    needs float64 inputs.
     """
 
-    e_nom: Array  # complex (y, x): nominal focal field
-    G: Array  # complex (m, y, x): d(E_focal)/d(mode)
+    e_nom: Array  # complex (y, x) or (w, y, x): nominal focal field
+    G: Array  # complex (m, y, x) or (w, m, y, x): d(E_focal)/d(mode)
     times_s: Array  # float (t,): ascending sample times in seconds
     eps_table: Array  # float (t, m): the coefficient trajectory
-    normalization: float
+    normalization: Array
     pixel_scale_lod: float
     epoch_jd: float
+    wavelengths_nm: Array | None
     coherent: bool = eqx.field(static=True)
 
     def __init__(
@@ -301,32 +309,43 @@ class TabulatedSpeckleField(AbstractSpeckleField):
         pixel_scale_lod=0.25,
         epoch_jd=J2000_JD,
         coherent=False,
+        wavelengths_nm=None,
     ):
         """Build a tabulated speckle field from a coefficient trajectory.
 
         Args:
-            e_nom: Complex nominal focal field, shape ``(y, x)``.
-            G: Complex sensitivity ``d(E_focal)/d(mode)``, shape ``(m, y, x)``.
+            e_nom: Complex nominal focal field, shape ``(y, x)`` -- or
+                ``(w, y, x)`` with ``wavelengths_nm`` set.
+            G: Complex sensitivity ``d(E_focal)/d(mode)``, shape
+                ``(m, y, x)`` -- or ``(w, m, y, x)`` with
+                ``wavelengths_nm`` set.
             times_s: Ascending sample times in seconds, shape ``(t,)``.
             eps_table: Mode coefficients at each sample time, shape ``(t, m)``.
             normalization: Intensity that maps to unit contrast (the telescope
-                PSF peak the focal field is referenced to).
-            pixel_scale_lod: Native pixel scale in lambda/D per pixel. Must
-                equal the coronagraph's plate scale for the speckle path.
+                PSF peak the focal field is referenced to); a scalar, or one
+                value per channel for a chromatic field.
+            pixel_scale_lod: Native pixel scale in lambda/D per pixel
+                (shared by every channel: the maps live in lambda/D units).
             epoch_jd: Julian Date mapping to ``time_s = 0``. Default J2000.
             coherent: Include the pinning cross term. Default ``False``.
+            wavelengths_nm: Channel wavelengths, shape ``(w,)``, enabling
+                the chromatic layout above. ``None`` (default) for a
+                monochromatic field.
         """
         self.e_nom = e_nom
         self.G = G
         self.times_s = times_s
         self.eps_table = eps_table
-        self.normalization = normalization
+        self.normalization = jnp.asarray(normalization, dtype=float)
         self.pixel_scale_lod = pixel_scale_lod
         self.epoch_jd = epoch_jd
+        self.wavelengths_nm = (
+            None if wavelengths_nm is None else jnp.asarray(wavelengths_nm, dtype=float)
+        )
         self.coherent = coherent
 
     def __check_init__(self):
-        """Validate the trajectory shapes against the mode count."""
+        """Validate the trajectory shapes and the (chromatic) layout."""
         if self.eps_table.ndim != 2:
             raise ValueError(
                 f"eps_table must be 2D (t, m), got shape {self.eps_table.shape}"
@@ -337,9 +356,13 @@ class TabulatedSpeckleField(AbstractSpeckleField):
                 f"times_s has shape {self.times_s.shape}; expected ({n_times},) "
                 "to match eps_table's time axis"
             )
-        if self.G.shape[0] != n_modes:
+        _check_chromatic_layout(
+            self.e_nom, self.G, self.normalization, self.wavelengths_nm
+        )
+        mode_axis = 0 if self.wavelengths_nm is None else 1
+        if self.G.shape[mode_axis] != n_modes:
             raise ValueError(
-                f"G has {self.G.shape[0]} modes but eps_table has {n_modes}"
+                f"G has {self.G.shape[mode_axis]} modes but eps_table has {n_modes}"
             )
 
     def _eps(self, time_s):
@@ -366,9 +389,45 @@ class TabulatedSpeckleField(AbstractSpeckleField):
 
     def realize(self, *, wavelength_nm, time_s=0.0):
         """Speckle contrast delta at ``time_s`` (see class docstring)."""
-        g_eps = jnp.tensordot(self._eps(time_s), self.G, axes=1)
+        e_nom, g, normalization = _select_channel(
+            self.e_nom, self.G, self.normalization, self.wavelengths_nm, wavelength_nm
+        )
+        g_eps = jnp.tensordot(self._eps(time_s), g, axes=1)
         if self.coherent:
-            delta = 2.0 * jnp.real(jnp.conj(self.e_nom) * g_eps) + jnp.abs(g_eps) ** 2
+            delta = 2.0 * jnp.real(jnp.conj(e_nom) * g_eps) + jnp.abs(g_eps) ** 2
         else:
             delta = jnp.abs(g_eps) ** 2
-        return delta / self.normalization
+        return delta / normalization
+
+    def broadened(self, *, reference_wavelength_nm, wavelengths_nm):
+        """A chromatic copy under the lambda-scaling approximation.
+
+        See ``physicaloptix.lambda_scaled_channels`` for the physics and
+        its limits (``G`` scales as ``lambda0/lambda``; ``e_nom`` is held
+        fixed; the lambda/D morphology is achromatic).
+
+        Args:
+            reference_wavelength_nm: The wavelength this field's ``G`` was
+                generated at.
+            wavelengths_nm: Channel wavelengths for the broadened field.
+
+        Returns:
+            A chromatic ``TabulatedSpeckleField`` sharing this field's
+            trajectory.
+        """
+        if self.wavelengths_nm is not None:
+            raise ValueError("field is already chromatic")
+        e_stack, g_stack = lambda_scaled_channels(
+            self.e_nom, self.G, reference_wavelength_nm, wavelengths_nm
+        )
+        return TabulatedSpeckleField(
+            e_stack,
+            g_stack,
+            self.times_s,
+            self.eps_table,
+            self.normalization,
+            pixel_scale_lod=self.pixel_scale_lod,
+            epoch_jd=self.epoch_jd,
+            coherent=self.coherent,
+            wavelengths_nm=wavelengths_nm,
+        )

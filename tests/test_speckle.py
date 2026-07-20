@@ -270,3 +270,47 @@ class TestPhysicaloptixIntegration:
         assert jnp.all(jnp.isfinite(out))
         at_zero = speckle.realize(wavelength_nm=500.0, time_s=0.0)
         np.testing.assert_allclose(np.asarray(at_zero), 0.0, atol=1e-30)
+
+
+class TestChromaticTabulatedField:
+    """The wavelength-channel axis on the replayed trajectory."""
+
+    def test_broadened_halo_scales_inverse_square(self, ingredients):
+        mono = TabulatedSpeckleField(**ingredients)
+        chrom = mono.broadened(
+            reference_wavelength_nm=900.0, wavelengths_nm=[450.0, 900.0]
+        )
+        blue = chrom.realize(wavelength_nm=450.0, time_s=10.0)
+        ref = chrom.realize(wavelength_nm=900.0, time_s=10.0)
+        np.testing.assert_allclose(np.asarray(blue), 4.0 * np.asarray(ref), rtol=1e-12)
+
+    def test_reference_channel_matches_mono(self, ingredients):
+        mono = TabulatedSpeckleField(**ingredients)
+        chrom = mono.broadened(
+            reference_wavelength_nm=900.0, wavelengths_nm=[450.0, 900.0]
+        )
+        a = mono.realize(wavelength_nm=900.0, time_s=15.0)
+        b = chrom.realize(wavelength_nm=900.0, time_s=15.0)
+        np.testing.assert_allclose(np.asarray(a), np.asarray(b), rtol=1e-12)
+
+    def test_trajectory_shared_across_channels(self, ingredients):
+        chrom = TabulatedSpeckleField(**ingredients).broadened(
+            reference_wavelength_nm=900.0, wavelengths_nm=[450.0, 900.0]
+        )
+        np.testing.assert_allclose(
+            np.asarray(chrom.eps(10.0)), np.asarray([1.0, -1.0]), rtol=1e-12
+        )
+
+    def test_chromatic_mode_axis_validated(self, ingredients):
+        chrom = TabulatedSpeckleField(**ingredients).broadened(
+            reference_wavelength_nm=900.0, wavelengths_nm=[450.0, 900.0]
+        )
+        with pytest.raises(ValueError, match="modes"):
+            TabulatedSpeckleField(
+                chrom.e_nom,
+                chrom.G[:, :1],  # drop a mode: mismatch with eps_table
+                ingredients["times_s"],
+                ingredients["eps_table"],
+                1.0,
+                wavelengths_nm=[450.0, 900.0],
+            )
