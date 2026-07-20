@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.0](https://github.com/CoreySpohn/tiptilt/compare/v0.1.0...v0.2.0) (2026-07-20)
+
+
+### Features
+
+* **speckle:** chromatic wavelength channels for TabulatedSpeckleField -- nearest-channel realize + lambda-scaled broadened() sharing the mode trajectory ([8f9bff2](https://github.com/CoreySpohn/tiptilt/commit/8f9bff2cdf4b731b24095508d725a6ac1a760f91))
+
 ## 0.1.0 (2026-07-18)
 
 
