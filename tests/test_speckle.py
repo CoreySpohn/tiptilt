@@ -219,6 +219,93 @@ class TestCorrelatedDriftField:
             )
 
 
+class TestPsdIsADensity:
+    """``psd`` is a DENSITY, so line j carries ``psd[j] df_j``.
+
+    On the uniform grids the older tests use, the widths are a constant that
+    normalizes away and nothing changes. On a LOG grid -- the natural choice
+    for drift spanning decades, and what physicaloptix's SpeckleProcess
+    builds -- using the bare ordinate synthesizes ``S(f) / f`` and the field
+    decorrelates far too slowly.
+    """
+
+    KNEE = 1e-3
+    TAU_C = 1.0 / (2.0 * np.pi * KNEE)
+
+    def _log_grid(self, n=64, decades_below=1.7, decades_above=2.3):
+        lo = np.log10(self.KNEE) - decades_below
+        hi = np.log10(self.KNEE) + decades_above
+        f = np.logspace(lo, hi, n)
+        return jnp.asarray(f), jnp.asarray(1.0 / (1.0 + (f / self.KNEE) ** 2))
+
+    def _measured_rho(self, freqs, psd, lags, *, df_weighted=True, n=4000):
+        e_nom, g = _synthetic_lin(m=1)
+        cov = jnp.asarray([[1.0]])
+
+        def eps_at(key):
+            field = correlated_drift_field(
+                e_nom,
+                g,
+                cov,
+                key=key,
+                frequencies_hz=freqs,
+                psd=psd,
+                normalization=1.0,
+                df_weighted=df_weighted,
+            )
+            return jnp.stack([field._eps(float(t))[0] for t in [0.0, *lags]])
+
+        keys = jax.random.split(jax.random.PRNGKey(11), n)
+        eps = np.asarray(jax.vmap(eps_at)(keys))  # (n, 1 + n_lags)
+        return np.mean(eps[:, :1] * eps[:, 1:], axis=0) / np.var(eps[:, 0])
+
+    def test_uniform_grid_changes_only_at_the_band_edges(self):
+        """On a uniform grid the interior widths are a constant that
+        normalizes away, so a uniform-grid caller sees no reweighting except
+        at the two extreme lines, which a trapezoid rule half-weights because
+        the band stops there rather than continuing.
+        """
+        from tiptilt.speckle import _line_powers
+
+        freqs = np.linspace(1e-4, 1e-2, 16)
+        psd = np.linspace(1.0, 0.1, 16)
+        with_df = _line_powers(freqs, psd, True)
+        without = _line_powers(freqs, psd, False)
+        ratio = with_df / without
+        np.testing.assert_allclose(ratio[1:-1], ratio[8], rtol=1e-12)
+        for edge in (0, -1):
+            assert np.isclose(ratio[edge], 0.5 * ratio[8], rtol=1e-12)
+
+    def test_log_grid_lorentzian_decorrelates_on_schedule(self):
+        """A Lorentzian PSD on a log grid must realize the OU kernel
+        exp(-tau / tau_c) that its knee names."""
+        freqs, psd = self._log_grid()
+        lags = [0.25 * self.TAU_C, self.TAU_C]
+        rho = self._measured_rho(freqs, psd, lags)
+        target = np.exp(-np.array(lags) / self.TAU_C)
+        np.testing.assert_allclose(rho, target, atol=0.04)
+
+    def test_bare_ordinate_weighting_is_far_too_slow(self):
+        """The pre-fix behavior, pinned: at one decorrelation time it retains
+        most of the correlation the Lorentzian has already lost."""
+        freqs, psd = self._log_grid(decades_below=0.7)
+        rho = self._measured_rho(freqs, psd, [self.TAU_C], df_weighted=False)[0]
+        assert rho > 1.5 * np.exp(-1.0)
+
+    def test_mismatched_shapes_are_rejected(self):
+        e_nom, g = _synthetic_lin()
+        with pytest.raises(ValueError, match="same shape"):
+            correlated_drift_field(
+                e_nom,
+                g,
+                jnp.asarray([[4.0, 1.0], [1.0, 9.0]]),
+                key=jax.random.PRNGKey(0),
+                frequencies_hz=jnp.linspace(1e-4, 1e-2, 8),
+                psd=jnp.ones(7),
+                normalization=1.0,
+            )
+
+
 class TestPhysicaloptixIntegration:
     def test_tabulated_field_from_a_linearized_path(self):
         """A real (E_nom, G) from physicaloptix.linearize over a Zernike basis

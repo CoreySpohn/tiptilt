@@ -38,6 +38,43 @@ J2000_JD = 2451545.0
 _NEFF_WARN = 8.0
 
 
+def _line_powers(frequencies_hz, psd, df_weighted):
+    """Per-line temporal power from a PSD sampled on a frequency grid.
+
+    ``psd`` is a power spectral DENSITY, so the power carried by line ``j`` is
+    ``S(f_j) df_j`` for the grid's quadrature widths, not the bare ordinate
+    ``S(f_j)``. The distinction is invisible on a uniform grid (the widths are
+    a constant that normalizes away) and decisive on a log grid, where using
+    the ordinate synthesizes ``S(f) / f`` instead of ``S(f)`` and the field
+    decorrelates far too slowly.
+
+    Args:
+        frequencies_hz: Frequency grid, shape ``(f,)``, increasing.
+        psd: Density sampled on that grid, shape ``(f,)``.
+        df_weighted: Apply the trapezoid widths. ``False`` reproduces the
+            pre-2026-07-25 behavior.
+
+    Returns:
+        The unnormalized per-line powers, a numpy array of shape ``(f,)``.
+
+    Raises:
+        ValueError: If the shapes disagree or the total power is not positive.
+    """
+    f = np.asarray(frequencies_hz, dtype=float)
+    power = np.asarray(psd, dtype=float)
+    if f.shape != power.shape:
+        raise ValueError(
+            f"frequencies_hz {f.shape} and psd {power.shape} must have the same shape"
+        )
+    if df_weighted and f.size > 1:
+        half = 0.5 * np.diff(f)
+        df = np.concatenate([[half[0]], half[1:] + half[:-1], [half[-1]]])
+        power = power * df
+    if float(power.sum()) <= 0.0:
+        raise ValueError("psd must have positive total power")
+    return power
+
+
 def _draw_correlated_spectrum(covariance_nm2, key, weights):
     """Draw a correlated spectral realization: per-mode ``(amplitudes, phases)``.
 
@@ -82,6 +119,7 @@ def correlated_drift_field(
     pixel_scale_lod=0.25,
     epoch_jd=J2000_JD,
     coherent=False,
+    df_weighted=True,
 ):
     """Build a stationary speckle field with a target cross-mode covariance.
 
@@ -96,8 +134,9 @@ def correlated_drift_field(
     The returned field is ONE frozen realization of that process. Its own
     time-averaged modal covariance is an unbiased but random sample of
     ``covariance_nm2`` with relative scatter ``~ 1/sqrt(N_eff)``, where
-    ``N_eff = (sum psd)^2 / sum(psd^2)`` is the participation ratio of the
-    weighting -- set by the PSD SHAPE, not the number of frequencies. A finite
+    ``N_eff = (sum w)^2 / sum(w^2)`` is the participation ratio of the per-line
+    powers ``w`` (``psd * df`` under ``df_weighted``) -- set by the PSD SHAPE
+    and the grid, not by the number of frequencies alone. A finite
     cosine sum is also almost-periodic: its lag covariance revives on ``~1/df``.
     So this is the right tool for broadband, whitish stationary drift (large
     ``N_eff``); for a red PSD (``N_eff`` near 1), a genuine autoregressive /
@@ -119,6 +158,11 @@ def correlated_drift_field(
         pixel_scale_lod: Native pixel scale in lambda/D per pixel.
         epoch_jd: Julian Date mapping to ``time_s = 0``. Default J2000.
         coherent: Include the pinning cross term. Default ``False``.
+        df_weighted: Treat ``psd`` as a density and give line ``j`` the power
+            ``psd[j] df_j`` (trapezoid widths of ``frequencies_hz``), so the
+            realized temporal kernel is the PSD's transform. Default ``True``;
+            a uniform grid is unaffected either way. Pass ``False`` to
+            reproduce ensembles drawn before 2026-07-25.
 
     Returns:
         A physicaloptix ``AnalyticSpeckleField``.
@@ -142,11 +186,9 @@ def correlated_drift_field(
             f"{eigvals.min():.3e}"
         )
 
-    psd = np.asarray(psd, dtype=float)
-    total = float(psd.sum())
-    if total <= 0.0:
-        raise ValueError("psd must have positive total power")
-    n_eff = total**2 / float((psd**2).sum())
+    power = _line_powers(frequencies_hz, psd, df_weighted)
+    total = float(power.sum())
+    n_eff = total**2 / float((power**2).sum())
     if n_eff < _NEFF_WARN:
         warnings.warn(
             f"correlated_drift_field: effective frequency count N_eff={n_eff:.1f} "
@@ -157,7 +199,7 @@ def correlated_drift_field(
             stacklevel=2,
         )
 
-    weights = jnp.asarray(2.0 * psd / total)
+    weights = jnp.asarray(2.0 * power / total)
     amplitudes, phases = _draw_correlated_spectrum(covariance_nm2, key, weights)
     return AnalyticSpeckleField(
         e_nom,
@@ -183,6 +225,7 @@ def correlated_channel_fields(
     local=None,
     epoch_jd=J2000_JD,
     coherent=True,
+    df_weighted=True,
 ):
     """Correlated per-channel speckle fields from one shared-mode draw.
 
@@ -214,6 +257,8 @@ def correlated_channel_fields(
             non-common-path block.
         epoch_jd: Julian Date mapping to ``time_s = 0``.
         coherent: Include the pinning cross term. Default ``True``.
+        df_weighted: Treat ``psd`` as a density (see
+            :func:`correlated_drift_field`). Default ``True``.
 
     Returns:
         A dict mapping each channel name to an ``AnalyticSpeckleField``.
@@ -228,11 +273,8 @@ def correlated_channel_fields(
             f"normalizations missing for channel(s) {missing}; every channel "
             "needs its own reference peak (a split ratio changes it)"
         )
-    psd_arr = np.asarray(psd, dtype=float)
-    total = float(psd_arr.sum())
-    if total <= 0.0:
-        raise ValueError("psd must have positive total power")
-    weights = jnp.asarray(2.0 * psd_arr / total)
+    power = _line_powers(frequencies_hz, psd, df_weighted)
+    weights = jnp.asarray(2.0 * power / float(power.sum()))
 
     key_shared, key_locals = jax.random.split(key)
     shared_amp, shared_phase = _draw_correlated_spectrum(
