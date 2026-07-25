@@ -18,6 +18,24 @@ sampled time series (a STOP thermal run) -- which a finite sum of cosines with
 bounded, time-constant variance structurally cannot hold. The realization is
 fixed at construction and interpolated by elapsed time, so it stays
 deterministic and differentiable, as the contract requires.
+
+The trajectory builders fill that table. :func:`ou_trajectory` is the exact
+stationary process (per-mode Ornstein-Uhlenbeck, autocorrelation exactly
+``exp(-lag/tau_k)`` at every step size), and it is the right choice over the
+cosine-sum builders whenever long lags matter: a finite line sum is
+almost-periodic, so its kernel revives rather than decaying.
+:func:`random_walk_trajectory` and :func:`creep_trajectory` cover the
+non-stationary drift the stationary family cannot express at all -- variance
+growing in time, and one-sided creep with a skewed marginal --
+and :func:`compose_trajectories` sums them into the single table the field
+replays::
+
+    times_s = jnp.arange(0.0, 8 * 3600.0, 60.0)
+    eps = compose_trajectories(
+        ou_trajectory(covariance_nm2, timescales_s, key=key, times_s=times_s),
+        creep_trajectory(rates_nm_per_s, times_s=times_s),
+    )
+    field = TabulatedSpeckleField(e_nom, G, times_s, eps, normalization)
 """
 
 import warnings
@@ -75,6 +93,99 @@ def _line_powers(frequencies_hz, psd, df_weighted):
     return power
 
 
+def _psd_sqrt(matrix):
+    """A square root of a symmetric positive-semidefinite matrix.
+
+    An eigendecomposition (``A = V diag(sqrt(max(lambda, 0)))``) rather than a
+    Cholesky factorization, so a rank-deficient covariance works: the modal
+    statistics that matter here (a screen coupling a few segment modes, a
+    covariance clipped to its leading eigenvectors) are routinely singular.
+
+    Args:
+        matrix: Symmetric positive-semidefinite ``(m, m)`` array.
+
+    Returns:
+        An ``(m, m)`` array ``A`` with ``A A^T`` equal to ``matrix``.
+    """
+    eigvals, eigvecs = jnp.linalg.eigh(matrix)
+    return eigvecs * jnp.sqrt(jnp.maximum(eigvals, 0.0))
+
+
+def _check_covariance(covariance_nm2, name="covariance_nm2"):
+    """Validate a modal covariance and return it as a numpy array.
+
+    Args:
+        covariance_nm2: Candidate ``(m, m)`` covariance.
+        name: Argument name to quote in the error messages.
+
+    Returns:
+        The validated covariance as a numpy array.
+
+    Raises:
+        ValueError: If it is not square, not symmetric, or has a materially
+            negative eigenvalue.
+    """
+    covariance = np.asarray(covariance_nm2)
+    if covariance.ndim != 2 or covariance.shape[0] != covariance.shape[1]:
+        raise ValueError(f"{name} must be square (m, m), got {covariance.shape}")
+    if not np.allclose(covariance, covariance.T, atol=1e-10, rtol=1e-6):
+        raise ValueError(f"{name} must be symmetric")
+    eigvals = np.linalg.eigvalsh(covariance)
+    tol = 1e-8 * max(float(np.abs(eigvals).max()), 1.0)
+    if eigvals.min() < -tol:
+        raise ValueError(
+            f"{name} must be positive semidefinite; min eigenvalue {eigvals.min():.3e}"
+        )
+    return covariance
+
+
+def _check_timescales(timescales_s, n_modes):
+    """Broadcast per-mode decorrelation timescales to ``(m,)`` and validate.
+
+    Args:
+        timescales_s: Scalar (shared by every mode) or ``(m,)`` timescales.
+        n_modes: The number of modes the covariance carries.
+
+    Returns:
+        The timescales as a numpy array of shape ``(m,)``.
+
+    Raises:
+        ValueError: If the shape disagrees with ``n_modes`` or any timescale is
+            not strictly positive.
+    """
+    tau = np.atleast_1d(np.asarray(timescales_s, dtype=float))
+    if tau.size == 1:
+        tau = np.full(n_modes, float(tau[0]))
+    if tau.shape != (n_modes,):
+        raise ValueError(
+            f"timescales_s has shape {tau.shape}; expected a scalar or "
+            f"({n_modes},) to match the covariance"
+        )
+    if not np.all(tau > 0.0):
+        raise ValueError("timescales_s must be positive")
+    return tau
+
+
+def _check_times(times_s):
+    """Validate a sample-time grid and return it as a numpy array.
+
+    Args:
+        times_s: Candidate sample times, shape ``(t,)``.
+
+    Returns:
+        The times as a numpy array.
+
+    Raises:
+        ValueError: If they are not 1D, empty, or not strictly ascending.
+    """
+    times = np.asarray(times_s, dtype=float)
+    if times.ndim != 1 or times.size == 0:
+        raise ValueError(f"times_s must be a non-empty 1D array, got {times.shape}")
+    if times.size > 1 and not np.all(np.diff(times) > 0.0):
+        raise ValueError("times_s must be strictly ascending")
+    return times
+
+
 def _draw_correlated_spectrum(covariance_nm2, key, weights):
     """Draw a correlated spectral realization: per-mode ``(amplitudes, phases)``.
 
@@ -94,8 +205,7 @@ def _draw_correlated_spectrum(covariance_nm2, key, weights):
         ``(amplitudes, phases)``, each a real ``(m, f)`` array.
     """
     covariance = jnp.asarray(covariance_nm2)
-    eigvals, eigvecs = jnp.linalg.eigh(covariance)
-    factor = eigvecs * jnp.sqrt(jnp.maximum(eigvals, 0.0))
+    factor = _psd_sqrt(covariance)
     n_modes = covariance.shape[0]
     n_freq = weights.shape[0]
     key_real, key_imag = jax.random.split(key)
@@ -171,20 +281,7 @@ def correlated_drift_field(
         ValueError: If ``covariance_nm2`` is not square, not symmetric, or has a
             materially negative eigenvalue, or if ``psd`` has non-positive total.
     """
-    covariance = np.asarray(covariance_nm2)
-    if covariance.ndim != 2 or covariance.shape[0] != covariance.shape[1]:
-        raise ValueError(
-            f"covariance_nm2 must be square (m, m), got {covariance.shape}"
-        )
-    if not np.allclose(covariance, covariance.T, atol=1e-10, rtol=1e-6):
-        raise ValueError("covariance_nm2 must be symmetric")
-    eigvals = np.linalg.eigvalsh(covariance)
-    tol = 1e-8 * max(float(np.abs(eigvals).max()), 1.0)
-    if eigvals.min() < -tol:
-        raise ValueError(
-            "covariance_nm2 must be positive semidefinite; min eigenvalue "
-            f"{eigvals.min():.3e}"
-        )
+    _check_covariance(covariance_nm2)
 
     power = _line_powers(frequencies_hz, psd, df_weighted)
     total = float(power.sum())
@@ -574,3 +671,251 @@ class TabulatedSpeckleField(AbstractSpeckleField):
             coherent=self.coherent,
             wavelengths_nm=wavelengths_nm,
         )
+
+
+def ou_covariance(covariance_nm2, timescales_s):
+    """The equal-time modal covariance an OU trajectory actually realizes.
+
+    Per-mode timescales and cross-mode correlation cannot both be imposed
+    freely: two processes with different spectra cannot be perfectly
+    correlated. Driving the modes with a common white noise of covariance
+    ``C`` gives the stationary covariance ``C * O`` (elementwise), where
+
+        O_kl = 2 sqrt(tau_k tau_l) / (tau_k + tau_l)
+
+    is the overlap of the two Lorentzian spectra. The DIAGONAL is untouched
+    (``O_kk = 1``), so every mode has exactly the requested variance and
+    exactly the autocorrelation ``exp(-lag/tau_k)``; only the cross terms are
+    damped, by how far apart the two timescales are (a decade of separation
+    keeps 57 percent of the correlation, two decades 20 percent). ``O`` is a
+    Gram matrix, so the product stays positive semidefinite (Schur) and the
+    process is drawable.
+
+    Use this wherever the realized covariance matters -- a PASTIS budget, a
+    moment oracle, a mode-allocation inversion -- rather than assuming the
+    trajectory delivers ``covariance_nm2`` itself.
+
+    Args:
+        covariance_nm2: Driving ``(m, m)`` modal covariance in nm^2.
+        timescales_s: Per-mode decorrelation timescale, scalar or ``(m,)``.
+
+    Returns:
+        The realized ``(m, m)`` equal-time covariance in nm^2.
+
+    Raises:
+        ValueError: If the covariance or the timescales fail validation.
+    """
+    covariance = _check_covariance(covariance_nm2)
+    tau = _check_timescales(timescales_s, covariance.shape[0])
+    overlap = 2.0 * np.sqrt(np.outer(tau, tau)) / (tau[:, None] + tau[None, :])
+    return jnp.asarray(covariance_nm2) * jnp.asarray(overlap)
+
+
+def ou_trajectory(covariance_nm2, timescales_s, *, key, times_s):
+    """Exact stationary drift trajectory with per-mode decorrelation times.
+
+    Each mode is an Ornstein-Uhlenbeck process,
+    ``d eps_k = -eps_k dt / tau_k + noise``, driven by a white noise with
+    cross-mode covariance ``covariance_nm2``, sampled by its EXACT discrete
+    transition (the AR(1) update ``eps <- a eps + L z`` with
+    ``a_k = exp(-dt/tau_k)`` and ``L L^T = Sigma * (1 - a a^T)``). There is no
+    time-discretization error at any step size, uniform or not, and the first
+    sample is drawn from the stationary distribution, so there is no burn-in.
+
+    This is the trajectory to reach for whenever long lags matter. The
+    cosine-sum builders (:func:`correlated_drift_field`,
+    :func:`grouped_drift_field`) synthesize a finite line spectrum, which is
+    almost-periodic: past a few decorrelation times its kernel stops decaying
+    and wanders, so decorrelation-limited quantities (post-processing floors
+    at long lags, multi-epoch scheduling gains) inherit an artifact. The OU
+    kernel is ``exp(-lag/tau_k)`` at every lag, by construction. Being exactly
+    Gaussian, it also needs no renormalization and carries no excess kurtosis.
+
+    The realized equal-time covariance is :func:`ou_covariance`, NOT
+    ``covariance_nm2`` itself, whenever the timescales differ across modes;
+    the diagonal is exact either way.
+
+    Args:
+        covariance_nm2: Driving ``(m, m)`` real symmetric positive-semidefinite
+            modal covariance in nm^2 (equal to the realized covariance when
+            every mode shares one timescale).
+        timescales_s: Per-mode decorrelation timescale in seconds, a scalar
+            (shared) or shape ``(m,)``. This is the ``1/e`` time of the modal
+            autocorrelation, ``tau = 1 / (2 pi f_knee)`` against a Lorentzian
+            knee frequency.
+        key: A JAX PRNG key freezing the realization.
+        times_s: Strictly ascending sample times in seconds, shape ``(t,)``.
+            A non-uniform grid is exact too, at the cost of one matrix square
+            root per step (``(t, m, m)`` of work, versus one factorization
+            reused by a uniform grid).
+
+    Returns:
+        The mode-coefficient trajectory in nm, shape ``(t, m)``, ready to pass
+        to :class:`TabulatedSpeckleField` alongside ``times_s``.
+
+    Raises:
+        ValueError: If the covariance, the timescales, or the time grid fail
+            validation.
+    """
+    covariance = _check_covariance(covariance_nm2)
+    n_modes = covariance.shape[0]
+    tau = _check_timescales(timescales_s, n_modes)
+    times = _check_times(times_s)
+
+    sigma = ou_covariance(covariance_nm2, tau)
+    inverse_tau = jnp.asarray(1.0 / tau)
+    noise = jax.random.normal(key, (times.size, n_modes))
+    start = _psd_sqrt(sigma) @ noise[0]
+    if times.size == 1:
+        return start[None, :]
+
+    steps_s = jnp.asarray(np.diff(times))
+    # 1 - a_k a_l via expm1 so a step much shorter than the timescales keeps
+    # its precision (the naive difference cancels to nothing there).
+    pair_rate = inverse_tau[:, None] + inverse_tau[None, :]
+
+    def advance(eps, xs):
+        decay, lower, z = xs
+        moved = decay * eps + lower @ z
+        return moved, moved
+
+    decays = jnp.exp(-steps_s[:, None] * inverse_tau)  # (t - 1, m)
+    if np.allclose(np.diff(times), np.diff(times)[0], rtol=1e-9, atol=0.0):
+        lower = _psd_sqrt(sigma * -jnp.expm1(-steps_s[0] * pair_rate))
+
+        def advance_uniform(eps, z):
+            return advance(eps, (decays[0], lower, z))
+
+        _, moved = jax.lax.scan(advance_uniform, start, noise[1:])
+    else:
+        lowers = jax.vmap(lambda dt: _psd_sqrt(sigma * -jnp.expm1(-dt * pair_rate)))(
+            steps_s
+        )
+        _, moved = jax.lax.scan(advance, start, (decays, lowers, noise[1:]))
+    return jnp.concatenate([start[None, :], moved], axis=0)
+
+
+def random_walk_trajectory(diffusion_nm2_per_s, *, key, times_s, start_nm=None):
+    """Non-stationary random-walk drift: variance growing linearly in time.
+
+    Correlated Brownian increments, so the coefficient covariance at elapsed
+    time ``t`` is ``diffusion_nm2_per_s * t`` and grows without bound. This is
+    the regime no stationary synthesis can represent -- a finite cosine sum has
+    bounded, time-constant variance by construction -- and it is what an
+    uncontrolled thermal or mechanical mode looks like between corrections.
+
+    The wavefront-control literature usually quotes drift as an rms per
+    control iteration (``sigma`` per ``sqrt(iteration)``); that maps here as
+    ``diffusion = sigma^2 / dt_iteration``.
+
+    Args:
+        diffusion_nm2_per_s: ``(m, m)`` real symmetric positive-semidefinite
+            covariance of the increment PER SECOND, in nm^2/s.
+        key: A JAX PRNG key freezing the realization.
+        times_s: Strictly ascending sample times in seconds, shape ``(t,)``.
+        start_nm: Coefficients at the first sample time, shape ``(m,)``.
+            Default ``None``, meaning start at the origin (the walk then
+            carries the drift SINCE the reference state, which is what a
+            residual after a dark-hole dig is).
+
+    Returns:
+        The mode-coefficient trajectory in nm, shape ``(t, m)``.
+
+    Raises:
+        ValueError: If the diffusion or the time grid fail validation.
+    """
+    diffusion = _check_covariance(diffusion_nm2_per_s, name="diffusion_nm2_per_s")
+    n_modes = diffusion.shape[0]
+    times = _check_times(times_s)
+    origin = jnp.zeros(n_modes) if start_nm is None else jnp.asarray(start_nm)
+    if times.size == 1:
+        return jnp.broadcast_to(origin, (1, n_modes))
+
+    factor = _psd_sqrt(jnp.asarray(diffusion_nm2_per_s))
+    steps_s = jnp.asarray(np.diff(times))
+    noise = jax.random.normal(key, (times.size - 1, n_modes))
+    increments = jnp.sqrt(steps_s)[:, None] * (noise @ factor.T)
+    walk = jnp.concatenate(
+        [jnp.zeros((1, n_modes)), jnp.cumsum(increments, axis=0)], axis=0
+    )
+    return walk + origin
+
+
+def creep_trajectory(rates_nm_per_s, *, times_s, key=None, rate_shape=None):
+    """One-sided linear creep, optionally with a drawn rate.
+
+    A deterministic ramp ``eps_k(t) = rate_k (t - t_0)`` -- the slow,
+    monotone component of measured observatory drift, which sits alongside a
+    faster stationary component rather than replacing it (compose the two with
+    :func:`compose_trajectories`).
+
+    With ``rate_shape`` the per-mode rate is drawn from a gamma distribution
+    of that shape scaled to the requested mean, which keeps the sign of
+    ``rates_nm_per_s`` in EVERY realization: the creep is one-sided, and the
+    resulting coefficient marginal is skewed by ``2 / sqrt(rate_shape)``
+    rather than Gaussian. That is the knob for the modal-skewness row of the
+    speckle-statistics ledger, where the heterodyne variance term responds
+    linearly to modal skewness and a symmetric process cannot probe it. Large
+    ``rate_shape`` recovers the deterministic ramp. Rates are drawn
+    independently per mode.
+
+    Args:
+        rates_nm_per_s: Per-mode creep rate in nm/s, shape ``(m,)``. Its sign
+            sets the direction of the creep.
+        times_s: Strictly ascending sample times in seconds, shape ``(t,)``.
+            Elapsed time is measured from the FIRST sample, so the trajectory
+            starts at zero.
+        key: A JAX PRNG key, required when ``rate_shape`` is set.
+        rate_shape: Gamma shape parameter for the drawn rate. Default
+            ``None``, a deterministic rate.
+
+    Returns:
+        The mode-coefficient trajectory in nm, shape ``(t, m)``.
+
+    Raises:
+        ValueError: If the time grid fails validation, if ``rate_shape`` is
+            set without a ``key``, or if it is not strictly positive.
+    """
+    times = _check_times(times_s)
+    rates = jnp.asarray(rates_nm_per_s, dtype=float)
+    if rates.ndim != 1:
+        raise ValueError(f"rates_nm_per_s must be 1D (m,), got {rates.shape}")
+    if rate_shape is not None:
+        if key is None:
+            raise ValueError("rate_shape needs a key: the drawn rate is random")
+        if not float(rate_shape) > 0.0:
+            raise ValueError(f"rate_shape must be positive, got {rate_shape}")
+        gamma = jax.random.gamma(key, float(rate_shape), shape=rates.shape)
+        rates = rates * gamma / float(rate_shape)
+    elapsed_s = jnp.asarray(times - times[0])
+    return elapsed_s[:, None] * rates
+
+
+def compose_trajectories(*eps_tables):
+    """Sum trajectories sampled on a shared time grid into one table.
+
+    Drift is a sum of regimes -- a fast stationary component, a slow creep, a
+    random walk between corrections -- and a speckle field replays ONE
+    coefficient table. Adding the tables is exact: the mode coefficients enter
+    the field linearly, so the composed table realizes the composed process
+    with no field-level composition machinery.
+
+    Args:
+        *eps_tables: Trajectories of identical shape ``(t, m)``, all sampled
+            on the same ``times_s``.
+
+    Returns:
+        Their sum, shape ``(t, m)``.
+
+    Raises:
+        ValueError: If no table is given or the shapes disagree.
+    """
+    if not eps_tables:
+        raise ValueError("compose_trajectories needs at least one trajectory")
+    shapes = {jnp.asarray(table).shape for table in eps_tables}
+    if len(shapes) != 1:
+        raise ValueError(
+            f"every trajectory must have the same shape (t, m), got {sorted(shapes)}; "
+            "build them on one shared times_s"
+        )
+    return sum(jnp.asarray(table) for table in eps_tables)

@@ -29,7 +29,12 @@ the mode basis, and the residual interface.
 
 - **Aberration sources** (`speckle`, `turbulence`): a stationary
   spectrally-factorized drift field, a tabulated replay field, correlated
-  multi-channel realizations, and von Karman / frozen-flow screens.
+  multi-channel realizations, and von Karman / frozen-flow screens. Trajectory
+  builders fill the replay field: an exact per-mode Ornstein-Uhlenbeck process
+  (autocorrelation `exp(-lag/tau)` at every lag and every step size, which the
+  spectral synthesis only approximates over a few decorrelation times), plus
+  the non-stationary regimes it cannot express at all -- a random walk whose
+  variance grows in time, and one-sided creep with a skewed marginal.
 - **Sensing** (`sensing`): pairwise probe estimation, Zernike wavefront
   sensor calibration and reconstruction, and Kalman field estimators behind
   a common `AbstractEstimator` seam.
