@@ -711,6 +711,61 @@ def ou_covariance(covariance_nm2, timescales_s):
     return jnp.asarray(covariance_nm2) * jnp.asarray(overlap)
 
 
+def ou_exposure_neff(timescales_s, exposure_s):
+    """Independent realizations an OU mode averages over in one exposure.
+
+    A detector integrates, so averaging a mode over a window of length ``T``
+    suppresses its variance by ``1 / N_eff``. For the exponential kernel this
+    integrates in closed form,
+
+        1 / N_eff = 2 (u - 1 + e^-u) / u^2,     u = T / tau,
+
+    with no quadrature, no ensemble, and no spectral grid -- and unlike the
+    spectral synthesis' version it is exact at EVERY exposure length, because
+    the kernel it integrates is exact at every lag. It runs from 1 for a
+    frozen field (``T`` far below ``tau``) to the familiar ``T / (2 tau)``
+    once the exposure spans many decorrelation times.
+
+    Use it to decide whether an exposure needs
+    ``AbstractSpeckleField.realize_average`` at all: at ``N_eff`` near 1 an
+    instantaneous realization IS the exposure, and at large ``N_eff`` a
+    snapshot overstates the speckle fluctuation by ``sqrt(N_eff)``.
+
+    Args:
+        timescales_s: Per-mode decorrelation timescale in seconds, a scalar
+            or shape ``(m,)``.
+        exposure_s: Exposure length in seconds, a scalar or an array
+            broadcast against the mode axis.
+
+    Returns:
+        ``N_eff`` with shape ``(m,) + jnp.shape(exposure_s)``, matching
+        ``physicaloptix.SpeckleProcess.exposure_neff``. A zero-length exposure
+        gives exactly 1.
+
+    Raises:
+        ValueError: If a timescale is not strictly positive.
+    """
+    tau = np.atleast_1d(np.asarray(timescales_s, dtype=float))
+    if not np.all(tau > 0.0):
+        raise ValueError("timescales_s must be positive")
+    t_exp = jnp.asarray(exposure_s, dtype=float)
+    u = t_exp.reshape(-1)[None, :] / jnp.asarray(tau)[:, None]  # (m, t)
+    # Two branches around u ~ 1e-4. Above it, evaluate directly, writing
+    # u - 1 + exp(-u) as u + expm1(-u) so the leading cancellation is exact.
+    # Below it even that loses the answer: the numerator vanishes as u^2 / 2,
+    # so subtracting two O(u) terms leaves only a few digits. There the
+    # Maclaurin series is the accurate form, and its own truncation error is
+    # O(u^4). Both branches are evaluated, so each must stay finite to keep
+    # the gradient clean -- hence the guarded arguments.
+    small = u < 1e-4
+    safe = jnp.where(small, 1.0, u)
+    direct = 2.0 * (safe + jnp.expm1(-safe)) / safe**2
+    tiny = jnp.where(small, u, 0.0)
+    series = 1.0 - tiny / 3.0 + tiny**2 / 12.0 - tiny**3 / 60.0
+    reduction = jnp.where(small, series, direct)
+    return (1.0 / reduction).reshape((tau.size, *t_exp.shape))
+
+
 def ou_lag_covariance(covariance_nm2, timescales_s, lag_s):
     """The two-time modal covariance ``Cov[eps(t), eps(t + lag)]``.
 

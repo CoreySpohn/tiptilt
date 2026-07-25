@@ -18,6 +18,7 @@ from tiptilt.speckle import (
     compose_trajectories,
     creep_trajectory,
     ou_covariance,
+    ou_exposure_neff,
     ou_lag_covariance,
     ou_trajectory,
     random_walk_trajectory,
@@ -554,3 +555,91 @@ class TestFeedsATabulatedField:
         assert early.shape == (ny, nx)
         assert jnp.all(jnp.isfinite(late))
         assert not jnp.allclose(early, late)
+
+
+class TestOUExposureNeff:
+    """Closed-form exposure averaging for the OU process.
+
+    Exact at EVERY exposure length, which is what separates it from the
+    spectral synthesis' version: the kernel being integrated is exact at
+    every lag rather than only over the window a finite line sum spans.
+    """
+
+    def test_a_frozen_field_averages_over_one_realization(self):
+        neff = np.asarray(ou_exposure_neff(1000.0, 1e-6))
+        np.testing.assert_allclose(neff, 1.0, rtol=1e-9)
+
+    def test_zero_exposure_is_exactly_one(self):
+        np.testing.assert_allclose(
+            np.asarray(ou_exposure_neff(jnp.asarray([10.0, 100.0]), 0.0)),
+            1.0,
+            rtol=1e-14,
+        )
+
+    def test_matches_the_closed_form(self):
+        tau = 500.0
+        for fraction in (0.01, 0.5, 1.0, 10.0, 100.0):
+            u = fraction
+            expected = u**2 / (2.0 * (u - 1.0 + np.exp(-u)))
+            got = float(np.asarray(ou_exposure_neff(tau, fraction * tau))[0])
+            assert got == pytest.approx(expected, rel=1e-10)
+
+    def test_long_exposure_approaches_half_the_timescale_ratio(self):
+        tau = 200.0
+        exposure = 1e4 * tau
+        got = float(np.asarray(ou_exposure_neff(tau, exposure))[0])
+        assert got == pytest.approx(exposure / (2.0 * tau), rel=1e-3)
+
+    def test_matches_a_generated_ensemble(self):
+        """The predicted suppression is what averaging real trajectories
+        delivers."""
+        tau = 300.0
+        exposure = 6.0 * tau
+        times = jnp.asarray(np.linspace(0.0, exposure, 600))
+        traj = _ensemble(
+            lambda key: ou_trajectory(
+                jnp.eye(2), jnp.asarray([tau, tau]), key=key, times_s=times
+            ),
+            n_samples=6000,
+        )
+        measured = traj.mean(axis=1).var(axis=0) / traj[:, 0, :].var(axis=0)
+        predicted = 1.0 / np.asarray(ou_exposure_neff(tau, exposure))[0]
+        np.testing.assert_allclose(measured, predicted, rtol=0.10)
+
+    def test_per_mode_and_broadcast_shapes(self):
+        tau = jnp.asarray([10.0, 1000.0])
+        neff = ou_exposure_neff(tau, jnp.asarray([100.0, 500.0, 2000.0]))
+        assert neff.shape == (2, 3)
+        # The fast mode averages over more realizations at every exposure.
+        assert np.all(np.asarray(neff)[0] > np.asarray(neff)[1])
+
+    def test_rejects_non_positive_timescales(self):
+        with pytest.raises(ValueError, match="positive"):
+            ou_exposure_neff(jnp.asarray([100.0, 0.0]), 10.0)
+
+    def test_traces_over_the_exposure(self):
+        """The exposure is what varies inside a simulation loop, so it must
+        jit and differentiate -- including at zero, where the closed form is
+        a 0/0 that only the guarded branches keep finite."""
+        tau = jnp.asarray([50.0, 500.0])
+
+        def total(exposure_s):
+            return jnp.sum(ou_exposure_neff(tau, exposure_s))
+
+        assert jnp.isfinite(jax.jit(total)(100.0))
+        assert jnp.isfinite(jax.grad(total)(100.0))
+        assert jnp.isfinite(jax.grad(total)(0.0))
+
+    def test_small_exposures_keep_their_precision(self):
+        """Below u ~ 1e-4 the direct form cancels to noise; the series branch
+        holds the exact N_eff - 1 = u/3 behaviour down to u = 1e-12."""
+        tau = 1.0
+        for u in (1e-12, 1e-9, 1e-6, 1e-4, 1e-3):
+            got = float(np.asarray(ou_exposure_neff(tau, u))[0])
+            assert got - 1.0 == pytest.approx(u / 3.0, rel=1e-3)
+
+    def test_the_two_branches_agree_at_the_crossover(self):
+        tau = 1.0
+        below = float(np.asarray(ou_exposure_neff(tau, 1e-4 * (1 - 1e-9)))[0])
+        above = float(np.asarray(ou_exposure_neff(tau, 1e-4 * (1 + 1e-9)))[0])
+        assert below == pytest.approx(above, rel=1e-11)
