@@ -712,3 +712,55 @@ class TestOUInnovationCovariance:
         scale = np.sqrt(np.outer(past.var(axis=0), residual.var(axis=0)))
         cross = (past[:, :, None] * residual[:, None, :]).mean(axis=0) / scale
         np.testing.assert_allclose(cross, 0.0, atol=0.03)
+
+
+class TestExposureAveragingOnARealField:
+    """The inherited ``realize_average`` on a concrete tabulated field."""
+
+    @staticmethod
+    def _field(times, eps_table):
+        rng = np.random.default_rng(5)
+        g = jnp.asarray(rng.standard_normal((2, 4, 4)) * (1 + 1j))
+        e_nom = jnp.asarray(rng.standard_normal((4, 4)) * (1 + 1j))
+        return TabulatedSpeckleField(e_nom, g, times, eps_table, 1.0)
+
+    def test_matches_the_hand_averaged_midpoints(self):
+        times = jnp.asarray(np.linspace(0.0, 400.0, 41))
+        eps = ou_trajectory(jnp.eye(2), 60.0, key=jax.random.PRNGKey(0), times_s=times)
+        field = self._field(times, eps)
+        got = field.realize_average(wavelength_nm=600.0, exposure_s=100.0, n_sub=4)
+        expected = (
+            sum(
+                field.realize(wavelength_nm=600.0, time_s=t)
+                for t in (12.5, 37.5, 62.5, 87.5)
+            )
+            / 4.0
+        )
+        np.testing.assert_allclose(np.asarray(got), np.asarray(expected), rtol=1e-12)
+
+    def test_averaging_suppresses_the_fluctuation_it_should(self):
+        """An exposure spanning many decorrelation times averages the speckle
+        down; a short one does not. The direction and rough size follow
+        ou_exposure_neff, which is the point of having the diagnostic."""
+        tau = 40.0
+        times = jnp.asarray(np.linspace(0.0, 4000.0, 2001))
+        spread = []
+        for exposure in (0.05 * tau, 40.0 * tau):
+            values = []
+            for seed in range(24):
+                eps = ou_trajectory(
+                    jnp.eye(2), tau, key=jax.random.PRNGKey(seed), times_s=times
+                )
+                field = self._field(times, eps)
+                values.append(
+                    float(
+                        jnp.mean(
+                            field.realize_average(
+                                wavelength_nm=600.0, exposure_s=exposure, n_sub=32
+                            )
+                        )
+                    )
+                )
+            spread.append(np.std(values))
+        assert spread[1] < 0.5 * spread[0]
+        assert float(np.asarray(ou_exposure_neff(tau, 40.0 * tau))[0]) > 15.0
