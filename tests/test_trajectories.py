@@ -19,6 +19,7 @@ from tiptilt.speckle import (
     creep_trajectory,
     ou_covariance,
     ou_exposure_neff,
+    ou_innovation_covariance,
     ou_lag_covariance,
     ou_trajectory,
     random_walk_trajectory,
@@ -643,3 +644,71 @@ class TestOUExposureNeff:
         below = float(np.asarray(ou_exposure_neff(tau, 1e-4 * (1 - 1e-9)))[0])
         above = float(np.asarray(ou_exposure_neff(tau, 1e-4 * (1 + 1e-9)))[0])
         assert below == pytest.approx(above, rel=1e-11)
+
+
+class TestOUInnovationCovariance:
+    """The unpredictable part of a step -- and the process's validity check."""
+
+    COV = jnp.asarray([[4.0, 5.4], [5.4, 9.0]])
+    TAU = jnp.asarray([50.0, 500.0])
+
+    def test_equals_sigma_minus_decayed_sigma(self):
+        step = 120.0
+        sigma = np.asarray(ou_covariance(self.COV, self.TAU))
+        decay = np.exp(-step / np.asarray(self.TAU))
+        expected = sigma - np.diag(decay) @ sigma @ np.diag(decay)
+        got = np.asarray(ou_innovation_covariance(self.COV, self.TAU, step))
+        np.testing.assert_allclose(got, expected, rtol=1e-12)
+
+    def test_a_vanishing_step_predicts_everything(self):
+        got = np.asarray(ou_innovation_covariance(self.COV, self.TAU, 0.0))
+        np.testing.assert_allclose(got, 0.0, atol=1e-14)
+
+    def test_a_long_step_predicts_nothing(self):
+        got = np.asarray(ou_innovation_covariance(self.COV, self.TAU, 1e6))
+        np.testing.assert_allclose(
+            got, np.asarray(ou_covariance(self.COV, self.TAU)), rtol=1e-12
+        )
+
+    def test_is_positive_semidefinite_for_random_processes(self):
+        """The validity condition, now checkable through the public API."""
+        rng = np.random.default_rng(1)
+        for _ in range(200):
+            n_modes = int(rng.integers(2, 6))
+            a = rng.standard_normal((n_modes, n_modes))
+            covariance = jnp.asarray(a @ a.T)
+            tau = jnp.asarray(10.0 ** rng.uniform(0.0, 4.0, size=n_modes))
+            step = float(10.0 ** rng.uniform(-1.0, 3.0))
+            innovation = np.asarray(ou_innovation_covariance(covariance, tau, step))
+            floor = -1e-12 * float(np.abs(np.asarray(covariance)).max())
+            assert np.linalg.eigvalsh(innovation).min() >= floor
+
+    def test_matches_the_realized_innovation(self):
+        """What a generated trajectory actually leaves unexplained after
+        propagating the previous sample forward."""
+        step = 150.0
+        times = jnp.asarray([0.0, step])
+        traj = _ensemble(
+            lambda key: ou_trajectory(self.COV, self.TAU, key=key, times_s=times),
+            n_samples=40000,
+        )
+        decay = np.exp(-step / np.asarray(self.TAU))
+        residual = traj[:, 1, :] - decay * traj[:, 0, :]
+        expected = np.asarray(ou_innovation_covariance(self.COV, self.TAU, step))
+        np.testing.assert_allclose(np.cov(residual.T), expected, rtol=0.06)
+
+    def test_the_residual_is_uncorrelated_with_the_past(self):
+        """It is an innovation, not just a residual: independent of the
+        sample it was propagated from."""
+        step = 150.0
+        times = jnp.asarray([0.0, step])
+        traj = _ensemble(
+            lambda key: ou_trajectory(self.COV, self.TAU, key=key, times_s=times),
+            n_samples=40000,
+        )
+        decay = np.exp(-step / np.asarray(self.TAU))
+        past = traj[:, 0, :]
+        residual = traj[:, 1, :] - decay * past
+        scale = np.sqrt(np.outer(past.var(axis=0), residual.var(axis=0)))
+        cross = (past[:, :, None] * residual[:, None, :]).mean(axis=0) / scale
+        np.testing.assert_allclose(cross, 0.0, atol=0.03)

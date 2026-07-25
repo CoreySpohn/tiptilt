@@ -711,6 +711,67 @@ def ou_covariance(covariance_nm2, timescales_s):
     return jnp.asarray(covariance_nm2) * jnp.asarray(overlap)
 
 
+def _ou_innovation(sigma, inverse_tau):
+    """Build the innovation-covariance map for one stationary OU process.
+
+    Returns a function of the step length, closing over the stationary
+    covariance and the per-mode rates so a scan can reuse it. The factor is
+    written with ``expm1`` because ``1 - a_k a_l`` cancels to nothing for a
+    step much shorter than the timescales, which is exactly the regime a fine
+    time grid sits in.
+
+    Args:
+        sigma: Stationary ``(m, m)`` covariance (already overlap-damped).
+        inverse_tau: Per-mode rates ``1 / tau``, shape ``(m,)``.
+
+    Returns:
+        A callable mapping a step length in seconds to the ``(m, m)``
+        innovation covariance.
+    """
+    pair_rate = inverse_tau[:, None] + inverse_tau[None, :]
+
+    def innovation(step_s):
+        return sigma * -jnp.expm1(-step_s * pair_rate)
+
+    return innovation
+
+
+def ou_innovation_covariance(covariance_nm2, timescales_s, step_s):
+    """Covariance of the OU innovation over one step: what a step cannot predict.
+
+    Splitting the process into the part a step carries forward and the part it
+    cannot, ``eps(t + dt) = D_a eps(t) + innovation``, this is the covariance of
+    that second piece, ``Sigma - D_a Sigma D_a`` for ``a_k = exp(-dt/tau_k)``.
+
+    It answers two different questions with one object. As PHYSICS it is the
+    unpredictable content of a step, so its eigenspectrum -- against the
+    stationary covariance's -- is what says whether predictive control has less
+    structure to work with than the raw residual does. As a CONTRACT it is the
+    validity condition on the process: a stationary AR(1) exists only if this
+    matrix is positive semidefinite at every step, which is not automatic for a
+    freely chosen covariance and per-mode timescales (see :func:`ou_covariance`)
+    but is guaranteed for the damped covariance this returns it for.
+
+    Args:
+        covariance_nm2: Driving ``(m, m)`` modal covariance in nm^2.
+        timescales_s: Per-mode decorrelation timescale, scalar or ``(m,)``.
+        step_s: Step length in seconds.
+
+    Returns:
+        The ``(m, m)`` innovation covariance in nm^2. It goes to zero as the
+        step does (a short step predicts almost everything) and to the full
+        stationary covariance as the step grows past every timescale (a long
+        step predicts nothing).
+
+    Raises:
+        ValueError: If the covariance or the timescales fail validation.
+    """
+    covariance = _check_covariance(covariance_nm2)
+    tau = _check_timescales(timescales_s, covariance.shape[0])
+    sigma = ou_covariance(covariance_nm2, tau)
+    return _ou_innovation(sigma, jnp.asarray(1.0 / tau))(jnp.asarray(step_s))
+
+
 def ou_exposure_neff(timescales_s, exposure_s):
     """Independent realizations an OU mode averages over in one exposure.
 
@@ -870,9 +931,6 @@ def ou_trajectory(covariance_nm2, timescales_s, *, key, times_s):
         return start[None, :]
 
     steps_s = jnp.asarray(np.diff(times))
-    # 1 - a_k a_l via expm1 so a step much shorter than the timescales keeps
-    # its precision (the naive difference cancels to nothing there).
-    pair_rate = inverse_tau[:, None] + inverse_tau[None, :]
 
     def advance(eps, xs):
         decay, lower, z = xs
@@ -880,17 +938,16 @@ def ou_trajectory(covariance_nm2, timescales_s, *, key, times_s):
         return moved, moved
 
     decays = jnp.exp(-steps_s[:, None] * inverse_tau)  # (t - 1, m)
+    innovation = _ou_innovation(sigma, inverse_tau)
     if np.allclose(np.diff(times), np.diff(times)[0], rtol=1e-9, atol=0.0):
-        lower = _psd_sqrt(sigma * -jnp.expm1(-steps_s[0] * pair_rate))
+        lower = _psd_sqrt(innovation(steps_s[0]))
 
         def advance_uniform(eps, z):
             return advance(eps, (decays[0], lower, z))
 
         _, moved = jax.lax.scan(advance_uniform, start, noise[1:])
     else:
-        lowers = jax.vmap(lambda dt: _psd_sqrt(sigma * -jnp.expm1(-dt * pair_rate)))(
-            steps_s
-        )
+        lowers = jax.vmap(lambda dt: _psd_sqrt(innovation(dt)))(steps_s)
         _, moved = jax.lax.scan(advance, start, (decays, lowers, noise[1:]))
     return jnp.concatenate([start[None, :], moved], axis=0)
 
