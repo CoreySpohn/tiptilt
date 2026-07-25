@@ -711,6 +711,42 @@ def ou_covariance(covariance_nm2, timescales_s):
     return jnp.asarray(covariance_nm2) * jnp.asarray(overlap)
 
 
+def ou_lag_covariance(covariance_nm2, timescales_s, lag_s):
+    """The two-time modal covariance ``Cov[eps(t), eps(t + lag)]``.
+
+    Column ``l`` of the equal-time covariance decayed by that mode's own
+    factor, ``Sigma_kl exp(-lag / tau_l)`` -- equivalently
+    ``ou_covariance(...) @ diag(rho)``. It is NOT symmetric when the modes
+    carry different timescales and the covariance is not diagonal, which is
+    the whole content of the per-mode generalization: how correlated mode
+    ``k`` now is with mode ``l`` later depends on which of the two is doing
+    the waiting.
+
+    This is the object the two-time variance forms consume, so a closed-form
+    prediction and this generator can be evaluated against the same matrix
+    instead of against two separately-derived ones. Do not symmetrize it: a
+    symmetric surrogate describes a different process.
+
+    Args:
+        covariance_nm2: Driving ``(m, m)`` modal covariance in nm^2.
+        timescales_s: Per-mode decorrelation timescale, scalar or ``(m,)``.
+        lag_s: Lag in seconds. Negative lags give the transpose.
+
+    Returns:
+        The ``(m, m)`` lag covariance in nm^2, in the convention
+        ``result[k, l] = Cov[eps_k(t), eps_l(t + lag_s)]``.
+
+    Raises:
+        ValueError: If the covariance or the timescales fail validation.
+    """
+    covariance = _check_covariance(covariance_nm2)
+    tau = _check_timescales(timescales_s, covariance.shape[0])
+    sigma = ou_covariance(covariance_nm2, tau)
+    lag = jnp.asarray(lag_s)
+    decay = jnp.exp(-jnp.abs(lag) / jnp.asarray(tau))
+    return jnp.where(lag >= 0.0, sigma * decay[None, :], sigma * decay[:, None])
+
+
 def ou_trajectory(covariance_nm2, timescales_s, *, key, times_s):
     """Exact stationary drift trajectory with per-mode decorrelation times.
 
@@ -733,7 +769,16 @@ def ou_trajectory(covariance_nm2, timescales_s, *, key, times_s):
 
     The realized equal-time covariance is :func:`ou_covariance`, NOT
     ``covariance_nm2`` itself, whenever the timescales differ across modes;
-    the diagonal is exact either way.
+    the diagonal is exact either way, and :func:`ou_lag_covariance` gives the
+    two-time law. That damping is what makes the process well posed rather
+    than a limitation of this implementation: a covariance and a set of
+    per-mode timescales are not a free pair, because a stationary AR(1)
+    requires the innovation covariance ``Sigma - D_a Sigma D_a`` to stay
+    positive semidefinite. Imposing an arbitrary covariance exactly while
+    giving the modes different timescales violates that for most inputs (it
+    is not a process at all), whereas deriving the damping from the
+    timescales satisfies it by construction, for every covariance and every
+    step size.
 
     Args:
         covariance_nm2: Driving ``(m, m)`` real symmetric positive-semidefinite

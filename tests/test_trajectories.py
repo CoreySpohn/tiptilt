@@ -18,6 +18,7 @@ from tiptilt.speckle import (
     compose_trajectories,
     creep_trajectory,
     ou_covariance,
+    ou_lag_covariance,
     ou_trajectory,
     random_walk_trajectory,
 )
@@ -85,6 +86,97 @@ class TestOUCovariance:
             np.asarray(covariance),
             rtol=1e-14,
         )
+
+
+class TestOUIsAlwaysRealizable:
+    """Why the equal-time covariance is damped rather than imposed.
+
+    A stationary AR(1) is only a process if its innovation covariance
+    ``Sigma - D_a Sigma D_a`` is positive semidefinite, so a covariance and a
+    set of per-mode timescales are NOT a free pair. Deriving the damping from
+    the timescales satisfies that constraint identically; imposing the
+    covariance instead violates it for most inputs.
+    """
+
+    @staticmethod
+    def _random_case(rng):
+        n_modes = int(rng.integers(2, 6))
+        a = rng.standard_normal((n_modes, n_modes))
+        covariance = a @ a.T
+        tau = 10.0 ** rng.uniform(0.0, 4.0, size=n_modes)
+        step_s = 10.0 ** rng.uniform(-1.0, 3.0)
+        decay = np.exp(-step_s / tau)
+        return covariance, tau, 1.0 - np.outer(decay, decay)
+
+    def test_the_realized_covariance_always_gives_a_valid_innovation(self):
+        rng = np.random.default_rng(0)
+        for _ in range(300):
+            covariance, tau, one_minus = self._random_case(rng)
+            sigma = np.asarray(ou_covariance(jnp.asarray(covariance), jnp.asarray(tau)))
+            innovation = sigma * one_minus
+            floor = -1e-12 * np.abs(covariance).max()
+            assert np.linalg.eigvalsh(innovation).min() >= floor
+
+    def test_imposing_the_target_covariance_usually_would_not(self):
+        rng = np.random.default_rng(0)
+        invalid = 0
+        for _ in range(300):
+            covariance, _, one_minus = self._random_case(rng)
+            innovation = covariance * one_minus  # the undamped alternative
+            if np.linalg.eigvalsh(innovation).min() < -1e-12 * np.abs(covariance).max():
+                invalid += 1
+        assert invalid > 150  # a majority, not an edge case
+
+
+class TestOULagCovariance:
+    """The two-time law ``Sigma_kl exp(-lag/tau_l)``, and its asymmetry."""
+
+    COV = jnp.asarray([[4.0, 5.4], [5.4, 9.0]])
+    TAU = jnp.asarray([50.0, 500.0])
+
+    def test_reduces_to_the_equal_time_covariance_at_zero_lag(self):
+        np.testing.assert_allclose(
+            np.asarray(ou_lag_covariance(self.COV, self.TAU, 0.0)),
+            np.asarray(ou_covariance(self.COV, self.TAU)),
+            rtol=1e-14,
+        )
+
+    def test_is_asymmetric_under_per_mode_timescales(self):
+        """How correlated mode k now is with mode l later is not the same as
+        the reverse: the lagged mode's own timescale does the decaying. A
+        symmetric surrogate would describe a different process."""
+        lag = ou_lag_covariance(self.COV, self.TAU, 200.0)
+        assert not np.allclose(np.asarray(lag), np.asarray(lag).T)
+        sigma = np.asarray(ou_covariance(self.COV, self.TAU))
+        tau = np.asarray(self.TAU)
+        np.testing.assert_allclose(
+            np.asarray(lag), sigma * np.exp(-200.0 / tau)[None, :], rtol=1e-14
+        )
+
+    def test_is_symmetric_when_the_timescales_agree(self):
+        lag = np.asarray(ou_lag_covariance(self.COV, 100.0, 250.0))
+        np.testing.assert_allclose(lag, lag.T, rtol=1e-14)
+
+    def test_negative_lag_is_the_transpose(self):
+        forward = np.asarray(ou_lag_covariance(self.COV, self.TAU, 200.0))
+        backward = np.asarray(ou_lag_covariance(self.COV, self.TAU, -200.0))
+        np.testing.assert_allclose(backward, forward.T, rtol=1e-14)
+
+    def test_matches_the_generated_ensemble(self):
+        """The closed form and the generator agree, including the asymmetry --
+        so an analytic two-time prediction and a realization can be compared
+        against the same matrix."""
+        lag = 200.0
+        times = jnp.asarray([0.0, lag])
+        traj = _ensemble(
+            lambda key: ou_trajectory(self.COV, self.TAU, key=key, times_s=times),
+            n_samples=40000,
+        )
+        measured = (traj[:, 0, :, None] * traj[:, 1, None, :]).mean(axis=0)
+        expected = np.asarray(ou_lag_covariance(self.COV, self.TAU, lag))
+        # Off-diagonal standard error is sqrt((s_kk s_ll + s_kl^2) / n) ~ 0.03.
+        np.testing.assert_allclose(measured, expected, atol=0.15)
+        assert abs(measured[0, 1] - measured[1, 0]) > 0.5  # the asymmetry is real
 
 
 class TestOUTrajectory:

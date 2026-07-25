@@ -66,6 +66,7 @@ from tiptilt.speckle import (
     creep_trajectory,
     grouped_drift_field,
     ou_covariance,
+    ou_lag_covariance,
     ou_trajectory,
     random_walk_trajectory,
 )
@@ -131,6 +132,7 @@ __all__ = [
     "ncpa_limited",
     "one_dm_vs_two_dm",
     "ou_covariance",
+    "ou_lag_covariance",
     "ou_trajectory",
     "pairwise_estimate",
     "pointing_jitter",
