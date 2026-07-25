@@ -37,9 +37,19 @@ class DarkZoneModel(eqx.Module):
 
     Carries the stacked control Jacobian and the command plumbing every
     estimator and controller shares. The dark-zone ordering is
-    wavelength-major, pixel-minor; ``stack_weights`` (sqrt of the spectrum
-    weights, ones for mono) map an UNWEIGHTED field estimate onto the
-    Jacobian's weighted stacking.
+    wavelength-major, pixel-minor; ``stack_weights`` map an UNWEIGHTED field
+    estimate onto the Jacobian's weighted stacking.
+
+    The model already weighted the WAVELENGTH axis (a broadband hole digs
+    each sub-band in proportion to its spectral weight). ``pixel_weights``
+    opens the same door on the SPATIAL axis, so "dig where it matters" is a
+    controller input rather than a binary mask choice: the two compose as
+    ``stack_weights[l, k] = sqrt(spectrum[l] * pixel[k])``, and weighted
+    least squares is the same normal equations with the weights folded into
+    the rows. Uniform weights reproduce the unweighted behavior exactly.
+    Weights are used only through ratios, so their overall scale is
+    irrelevant and the library deliberately does not normalize them (a
+    caller may be carrying posterior probability mass and want it readable).
 
     Attributes:
         path: The optical path (commands applied by ``set_commands``).
@@ -48,6 +58,7 @@ class DarkZoneModel(eqx.Module):
         mask: Boolean dark-zone mask.
         weights: Spectrum weights (ones for a monochromatic field).
         sqrt_weights: Their square roots.
+        pixel_weights: Per-dark-zone-pixel weights (ones when uniform).
         stack_weights: Per-(wavelength, pixel) sqrt weights, stacked.
         g_dz: The dark-zone Jacobian, shape ``(n_stack, n_total)``.
         operating_point: The command the Jacobian was built at.
@@ -59,6 +70,7 @@ class DarkZoneModel(eqx.Module):
     mask: Array
     weights: Array
     sqrt_weights: Array
+    pixel_weights: Array
     stack_weights: Array
     g_dz: Array
     operating_point: Array
@@ -89,15 +101,29 @@ class DarkZoneModel(eqx.Module):
         return data[:, self.mask].reshape(-1)
 
     def contrast(self, data):
-        """Weight-averaged mean dark-zone intensity (broadband contrast)."""
+        """Weight-averaged mean dark-zone intensity (broadband contrast).
+
+        Averaged over the pixel axis with ``pixel_weights`` (uniform weights
+        reduce to the plain mean) and over the wavelength axis with the
+        spectrum weights.
+        """
+        pixel_w = self.pixel_weights
+        denom = jnp.sum(pixel_w)
         if data.ndim == 2:
-            return jnp.mean(jnp.abs(data[self.mask]) ** 2)
+            return jnp.sum(pixel_w * jnp.abs(data[self.mask]) ** 2) / denom
         intensity = jnp.abs(data[:, self.mask]) ** 2  # (nlam, n_dz)
-        return jnp.mean(jnp.tensordot(self.weights, intensity, axes=1))
+        return jnp.sum(pixel_w * jnp.tensordot(self.weights, intensity, axes=1)) / denom
 
     @classmethod
     def build(
-        cls, path, dm_indices, dark_zone_mask, *, jacobian_field, operating_point=None
+        cls,
+        path,
+        dm_indices,
+        dark_zone_mask,
+        *,
+        jacobian_field,
+        operating_point=None,
+        pixel_weights=None,
     ):
         """Linearize a path's dark zone about an operating point.
 
@@ -112,9 +138,21 @@ class DarkZoneModel(eqx.Module):
             operating_point: Stacked command to linearize at; defaults to
                 zeros (the dig-from-cold base point). A maintenance loop
                 passes the pre-dug command.
+            pixel_weights: Optional nonnegative per-dark-zone-pixel weights,
+                shape ``(n_dz,)`` in the mask's flattened order, defaulting to
+                uniform. Only ratios matter, so the scale is free and the
+                library does not normalize them. Weights are STATIC per build
+                (they change per target or epoch, not per iteration), so the
+                intended pattern is rebuilding the model per visit. A pixel
+                weighted zero leaves the solve entirely, which also removes it
+                from what the Tikhonov regularization sees.
 
         Returns:
             A ``DarkZoneModel``.
+
+        Raises:
+            ValueError: If ``dark_zone_mask`` selects no pixels, or
+                ``pixel_weights`` has the wrong shape or a negative entry.
         """
         indices = (dm_indices,) if isinstance(dm_indices, int) else tuple(dm_indices)
         for i in indices:
@@ -140,16 +178,34 @@ class DarkZoneModel(eqx.Module):
         weights = jnp.ones(1) if spectrum is None else spectrum.weights
         sqrt_weights = jnp.sqrt(weights)
         n_dark = int(jnp.sum(mask))
-        stack_weights = jnp.repeat(sqrt_weights, n_dark)
+        if pixel_weights is None:
+            pixel_w = jnp.ones(n_dark)
+        else:
+            pixel_w = jnp.asarray(pixel_weights, dtype=float)
+            if pixel_w.shape != (n_dark,):
+                raise ValueError(
+                    f"pixel_weights has shape {pixel_w.shape}; expected "
+                    f"({n_dark},) to match the dark-zone pixel count"
+                )
+            if bool(jnp.any(pixel_w < 0.0)):
+                raise ValueError("pixel_weights must be nonnegative")
+        sqrt_pixel_w = jnp.sqrt(pixel_w)
+        # Composed sqrt weights: stack_weights[l, k] = sqrt(spectrum_l * pixel_k),
+        # so the spectral and spatial axes multiply rather than compete.
+        stack_weights = (sqrt_weights[:, jnp.newaxis] * sqrt_pixel_w).reshape(-1)
         if operating_point is None:
             operating_point = jnp.zeros(n_total)
 
         # A weighted view for the Jacobian only; the model's public
         # dark-zone vector stays unweighted (the estimators' convention).
+        # Scaling a row by sqrt(w) is what turns the least squares the
+        # controllers solve into the WEIGHTED least squares.
         def weighted_dark_zone(data):
             if data.ndim == 2:
-                return data[mask]
-            return (sqrt_weights[:, jnp.newaxis] * data[:, mask]).reshape(-1)
+                return sqrt_pixel_w * data[mask]
+            return (
+                sqrt_weights[:, jnp.newaxis] * sqrt_pixel_w * data[:, mask]
+            ).reshape(-1)
 
         model = cls(
             path=path,
@@ -158,6 +214,7 @@ class DarkZoneModel(eqx.Module):
             mask=mask,
             weights=weights,
             sqrt_weights=sqrt_weights,
+            pixel_weights=pixel_w,
             stack_weights=stack_weights,
             g_dz=jnp.zeros((0, n_total)),  # placeholder, replaced below
             operating_point=operating_point,
@@ -379,6 +436,7 @@ def close_dark_hole(
     probe_dm=None,
     detector=None,
     key=None,
+    pixel_weights=None,
 ):
     """Dig a dark hole with deformable mirrors by electric-field conjugation.
 
@@ -449,6 +507,9 @@ def close_dark_hole(
         detector: Optional ``callable(image, key) -> image`` applying measurement
             noise to each probe image in the ``"pairwise"`` loop.
         key: PRNG key for the detector, split per step.
+        pixel_weights: Optional per-dark-zone-pixel weights passed through to
+            :meth:`DarkZoneModel.build`, so the loop digs where the weight is
+            rather than uniformly across the mask. Uniform by default.
 
     Returns:
         ``(command, dark_zone_history)``: the final stacked DM command (the DMs'
@@ -478,7 +539,11 @@ def close_dark_hole(
         model_field if (estimated and model_field is not None) else input_field
     )
     dz_model = DarkZoneModel.build(
-        path, indices, dark_zone_mask, jacobian_field=jacobian_field
+        path,
+        indices,
+        dark_zone_mask,
+        jacobian_field=jacobian_field,
+        pixel_weights=pixel_weights,
     )
     controller = EFCController.build(dz_model, gain=gain, regularization=regularization)
 

@@ -19,7 +19,7 @@ from physicaloptix import (
     fourier_dm_basis,
 )
 
-from tiptilt.control import close_dark_hole
+from tiptilt.control import DarkZoneModel, EFCController, close_dark_hole
 from tiptilt.sensing import probe_set
 
 WL = 500.0
@@ -474,3 +474,191 @@ class TestEstimatedTwoDeformableMirrors:
             probe_dm=0,
         )
         assert float(history[-1]) < 0.6 * float(history[0])  # digs the broadband hole
+
+
+def _weighted_setup(npix=16, nfoc=32, pscale=0.5):
+    """A path with a WIDE dark zone, so a spatial weighting has room to act.
+
+    The default ``_setup`` zone is a couple of pixels around one speckle,
+    which cannot distinguish "dig here" from "dig there".
+    """
+    pupil = Grid.pupil(npix)
+    focal = Grid.focal(nfoc, pscale)
+    x = np.asarray(pupil.coords)
+    x_grid, y_grid = np.meshgrid(x, x)
+    aperture = (x_grid**2 + y_grid**2 <= 0.25).astype(float)
+    aberration = sum(
+        3.0 * np.cos(2 * np.pi * (kx * x_grid + ky * y_grid)) for kx, ky in _KS
+    )
+    e_in = aperture * np.exp(1j * 2 * np.pi * aberration / WL)
+    field = Field(data=jnp.asarray(e_in), grid=pupil, plane=PlaneKind.PUPIL)
+    path = OpticalPath(
+        stages=(
+            Stage("dm", PhaseScreen(_fourier_dm(npix), pupil, wavelength_nm=WL)),
+            Stage("science", Fraunhofer(grid_in=pupil, grid_out=focal)),
+        )
+    )
+    fx = np.asarray(focal.coords)
+    fx_grid, fy_grid = np.meshgrid(fx, fx)
+    radius = np.hypot(fx_grid, fy_grid)
+    mask = (radius > 1.5) & (radius < 5.0) & (fx_grid > 0.0)
+    return path, field, jnp.asarray(mask), (fx_grid, fy_grid)
+
+
+def _dz_coords(mask, grids):
+    """The (x, y) focal coordinates of the dark-zone pixels, in mask order."""
+    fx_grid, fy_grid = grids
+    sel = np.asarray(mask)
+    return fx_grid[sel], fy_grid[sel]
+
+
+class TestPixelWeights:
+    """Per-pixel weighted dark-zone objectives (gates W0-W3).
+
+    The dark-zone metric already weights WAVELENGTHS; these open the same
+    door on the spatial axis so a controller can be told where the contrast
+    actually matters (a posterior-shaped confirmation hole) instead of only
+    being handed a binary mask.
+    """
+
+    def test_w0_uniform_weights_are_the_unweighted_model(self):
+        """W0: None and ones are the same model, bit for bit -- the feature
+        cannot perturb any existing caller."""
+        path, field, mask, _ = _weighted_setup()
+        n_dz = int(jnp.sum(mask))
+        base = DarkZoneModel.build(path, 0, mask, jacobian_field=field)
+        ones = DarkZoneModel.build(
+            path, 0, mask, jacobian_field=field, pixel_weights=jnp.ones(n_dz)
+        )
+        np.testing.assert_array_equal(np.asarray(base.g_dz), np.asarray(ones.g_dz))
+        np.testing.assert_array_equal(
+            np.asarray(base.stack_weights), np.asarray(ones.stack_weights)
+        )
+        data = base.focal_of(jnp.zeros(base.n_total), field)
+        assert float(base.contrast(data)) == float(ones.contrast(data))
+
+    def test_w1_delta_weights_equal_restricting_the_mask(self):
+        """W1: a 0/1 weight is the hard-mask special case. Zero-weighted rows
+        contribute nothing to the normal equations, so the command must match
+        the one from a model built on the restricted mask alone."""
+        path, field, mask, grids = _weighted_setup()
+        fx_dz, _ = _dz_coords(mask, grids)
+        inner = fx_dz < 3.0  # a sub-region of the zone
+
+        sub_mask = np.zeros(np.asarray(mask).shape, dtype=bool)
+        sel = np.asarray(mask)
+        sub_mask[sel] = inner
+
+        weighted = DarkZoneModel.build(
+            path,
+            0,
+            mask,
+            jacobian_field=field,
+            pixel_weights=jnp.asarray(inner.astype(float)),
+        )
+        restricted = DarkZoneModel.build(
+            path, 0, jnp.asarray(sub_mask), jacobian_field=field
+        )
+        kw = dict(gain=0.5, regularization=1e-6)
+        _, delta_w = EFCController.build(weighted, **kw).command_delta(
+            weighted.dark_zone_unweighted(
+                weighted.focal_of(jnp.zeros(weighted.n_total), field)
+            )
+        )
+        _, delta_r = EFCController.build(restricted, **kw).command_delta(
+            restricted.dark_zone_unweighted(
+                restricted.focal_of(jnp.zeros(restricted.n_total), field)
+            )
+        )
+        np.testing.assert_allclose(
+            np.asarray(delta_w), np.asarray(delta_r), rtol=1e-6, atol=1e-9
+        )
+
+    def test_w2_soft_weights_beat_a_matched_area_hard_mask(self):
+        """W2: the motivating property. Against a broad Gaussian preference,
+        a soft weighting digs a better WEIGHTED contrast than the best hard
+        mask of comparable area -- which is the reason soft weights exist
+        rather than just a smaller mask."""
+        path, field, mask, grids = _weighted_setup()
+        fx_dz, fy_dz = _dz_coords(mask, grids)
+        # A broad preference centred in the zone (posterior-like, sigma ~ 1 l/D).
+        soft = np.exp(-((fx_dz - 3.0) ** 2 + fy_dz**2) / (2.0 * 1.0**2))
+        # The matched hard mask: the same total weight, but binary.
+        cut = np.quantile(soft, 1.0 - soft.sum() / soft.size)
+        hard = (soft >= cut).astype(float)
+
+        def dug_weighted_contrast(weights):
+            model = DarkZoneModel.build(
+                path,
+                0,
+                mask,
+                jacobian_field=field,
+                pixel_weights=jnp.asarray(weights),
+            )
+            controller = EFCController.build(model, gain=0.5, regularization=1e-6)
+            command = jnp.zeros(model.n_total)
+            for _ in range(15):
+                data = model.focal_of(command, field)
+                _, delta = controller.command_delta(model.dark_zone_unweighted(data))
+                command = command + delta
+            # Score BOTH on the same soft objective.
+            scorer = DarkZoneModel.build(
+                path, 0, mask, jacobian_field=field, pixel_weights=jnp.asarray(soft)
+            )
+            return float(scorer.contrast(scorer.focal_of(command, field)))
+
+        assert dug_weighted_contrast(soft) < dug_weighted_contrast(hard)
+
+    def test_w3_spectral_and_pixel_weights_compose(self):
+        """W3: the two axes multiply into stack_weights as
+        sqrt(spectrum * pixel), and mono + uniform recovers W0's stacking."""
+        path, field, mask, _ = _weighted_setup()
+        n_dz = int(jnp.sum(mask))
+        rng = np.random.default_rng(0)
+        pixel = jnp.asarray(rng.uniform(0.1, 2.0, n_dz))
+        band = broadcast_to_spectrum(field, Spectrum.tophat(WL, 0.1, 3))
+
+        model = DarkZoneModel.build(
+            path, 0, mask, jacobian_field=band, pixel_weights=pixel
+        )
+        expected = np.sqrt(
+            np.asarray(model.weights)[:, None] * np.asarray(pixel)[None, :]
+        ).reshape(-1)
+        np.testing.assert_allclose(
+            np.asarray(model.stack_weights), expected, rtol=1e-12
+        )
+        mono = DarkZoneModel.build(path, 0, mask, jacobian_field=field)
+        np.testing.assert_allclose(
+            np.asarray(mono.stack_weights), np.ones(n_dz), rtol=1e-12
+        )
+
+    def test_rejects_wrong_shaped_weights(self):
+        path, field, mask, _ = _weighted_setup()
+        with pytest.raises(ValueError, match="pixel_weights has shape"):
+            DarkZoneModel.build(
+                path, 0, mask, jacobian_field=field, pixel_weights=jnp.ones(3)
+            )
+
+    def test_rejects_negative_weights(self):
+        path, field, mask, _ = _weighted_setup()
+        n_dz = int(jnp.sum(mask))
+        bad = jnp.asarray(np.r_[-1.0, np.ones(n_dz - 1)])
+        with pytest.raises(ValueError, match="nonnegative"):
+            DarkZoneModel.build(path, 0, mask, jacobian_field=field, pixel_weights=bad)
+
+    def test_close_dark_hole_accepts_pixel_weights(self):
+        """The driver threads the weights through to the model it builds."""
+        path, field, mask, grids = _weighted_setup()
+        fx_dz, fy_dz = _dz_coords(mask, grids)
+        soft = jnp.asarray(np.exp(-((fx_dz - 3.0) ** 2 + fy_dz**2) / 2.0))
+        _, history = close_dark_hole(
+            path,
+            field,
+            0,
+            mask,
+            n_steps=12,
+            gain=0.5,
+            regularization=1e-6,
+            pixel_weights=soft,
+        )
+        assert float(history[-1]) < float(history[0])
