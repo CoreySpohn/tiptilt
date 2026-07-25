@@ -214,6 +214,107 @@ def correlated_drift_field(
     )
 
 
+def grouped_drift_field(
+    e_nom,
+    G,
+    groups,
+    *,
+    key,
+    normalization,
+    pixel_scale_lod=0.25,
+    epoch_jd=J2000_JD,
+    coherent=False,
+    df_weighted=True,
+):
+    """Stationary field whose mode BLOCKS drift on different timescales.
+
+    :func:`correlated_drift_field` gives every mode one shared temporal PSD, so
+    the cross-spectral density is forced to factorize as ``C_a x psd(f)``: the
+    modes may be correlated in space and may carry different variances, but
+    they all decorrelate on the same schedule. Real observatories do not work
+    that way -- segment piston/tip/tilt rattles fast while a thermal bulk mode
+    creeps -- and no single ``(covariance, psd)`` pair can express that.
+
+    This builder takes a SEQUENCE of blocks, each with its own covariance, its
+    own frequency grid, and its own PSD, and concatenates them along the mode
+    axis (the pattern :func:`correlated_channel_fields` already uses for local
+    non-common-path blocks). Blocks are drawn independently, so this supplies
+    within-block spatial correlation on a per-block timescale; it deliberately
+    does not create cross-block correlation, which would need a full
+    cross-spectral density rather than a list.
+
+    Args:
+        e_nom: Complex nominal focal field, shape ``(y, x)``.
+        G: Complex sensitivity ``d(E_focal)/d(mode)``, shape ``(m, y, x)``,
+            whose mode axis is the blocks concatenated in order.
+        groups: Sequence of ``(covariance_nm2, frequencies_hz, psd)``. Every
+            block needs the same NUMBER of frequencies (they stack into one
+            ``(m, f)`` array) but the grids and PSD shapes may differ.
+        key: A JAX PRNG key freezing the drawn realization.
+        normalization: Intensity that maps to unit contrast.
+        pixel_scale_lod: Native pixel scale in lambda/D per pixel.
+        epoch_jd: Julian Date mapping to ``time_s = 0``. Default J2000.
+        coherent: Include the pinning cross term. Default ``False``.
+        df_weighted: Treat each PSD as a density (see
+            :func:`correlated_drift_field`). Default ``True``.
+
+    Returns:
+        A physicaloptix ``AnalyticSpeckleField`` over all blocks' modes. Its
+        ``frequencies_hz`` is ``(f,)`` when every block shares one grid and
+        ``(m, f)`` otherwise.
+
+    Raises:
+        ValueError: If ``groups`` is empty, the blocks' frequency counts
+            disagree, or the block sizes do not sum to ``G``'s mode axis.
+    """
+    if len(groups) == 0:
+        raise ValueError("groups must contain at least one (covariance, freqs, psd)")
+    n_freq = np.asarray(groups[0][1]).shape[-1]
+
+    amplitude_blocks, phase_blocks, freq_blocks = [], [], []
+    for i, (covariance, freqs, psd) in enumerate(groups):
+        freqs = np.asarray(freqs, dtype=float)
+        if freqs.shape[-1] != n_freq:
+            raise ValueError(
+                f"group {i} has {freqs.shape[-1]} frequencies but group 0 has "
+                f"{n_freq}; blocks stack into one (m, f) array so the counts "
+                "must agree (resample the grids, or build separate fields)"
+            )
+        power = _line_powers(freqs, psd, df_weighted)
+        weights = jnp.asarray(2.0 * power / float(power.sum()))
+        amplitudes, phases = _draw_correlated_spectrum(
+            covariance, jax.random.fold_in(key, i), weights
+        )
+        amplitude_blocks.append(amplitudes)
+        phase_blocks.append(phases)
+        freq_blocks.append(jnp.broadcast_to(jnp.asarray(freqs), amplitudes.shape))
+
+    amplitudes = jnp.concatenate(amplitude_blocks, axis=0)
+    phases = jnp.concatenate(phase_blocks, axis=0)
+    if amplitudes.shape[0] != G.shape[0]:
+        raise ValueError(
+            f"the blocks supply {amplitudes.shape[0]} modes but G has "
+            f"{G.shape[0]}; G's mode axis must be the blocks concatenated "
+            "in order"
+        )
+    frequencies = jnp.concatenate(freq_blocks, axis=0)
+    # Collapse to the shared 1D grid when every block agrees, so a
+    # single-timescale call is indistinguishable from correlated_drift_field.
+    if bool(jnp.all(frequencies == frequencies[:1])):
+        frequencies = frequencies[0]
+    return AnalyticSpeckleField(
+        e_nom,
+        G,
+        amplitudes,
+        frequencies,
+        phases,
+        normalization,
+        pixel_scale_lod=pixel_scale_lod,
+        epoch_jd=epoch_jd,
+        coherent=coherent,
+    )
+
+
 def correlated_channel_fields(
     mcl,
     shared_covariance_nm2,

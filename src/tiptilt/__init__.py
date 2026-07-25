@@ -62,6 +62,7 @@ from tiptilt.speckle import (
     TabulatedSpeckleField,
     correlated_channel_fields,
     correlated_drift_field,
+    grouped_drift_field,
 )
 from tiptilt.testbed import (
     ALGORITHMS,
@@ -113,6 +114,7 @@ __all__ = [
     "dual_science_common_mode",
     "estimate_field_pairwise",
     "frozen_flow_sequence",
+    "grouped_drift_field",
     "hardware_dm",
     "hold_against_drift",
     "lowfs_calibrate",

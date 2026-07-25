@@ -10,6 +10,7 @@ from tiptilt.speckle import (
     TabulatedSpeckleField,
     _draw_correlated_spectrum,
     correlated_drift_field,
+    grouped_drift_field,
 )
 
 
@@ -303,6 +304,114 @@ class TestPsdIsADensity:
                 frequencies_hz=jnp.linspace(1e-4, 1e-2, 8),
                 psd=jnp.ones(7),
                 normalization=1.0,
+            )
+
+
+class TestGroupedDriftField:
+    """Mode blocks may drift on their OWN timescales (upgrades #1).
+
+    A single (covariance, psd) pair forces the cross-spectral density to
+    factorize as C_a x psd(f): every mode decorrelates on one schedule. These
+    pin that a fast block and a slow block coexist in one field.
+    """
+
+    def _grid(self, knee, n=48):
+        f = np.logspace(np.log10(knee) - 1.7, np.log10(knee) + 2.3, n)
+        return jnp.asarray(f), jnp.asarray(1.0 / (1.0 + (f / knee) ** 2))
+
+    def _blocks(self, knee_fast=1e-2, knee_slow=1e-4):
+        return [
+            (jnp.asarray([[1.0]]), *self._grid(knee_fast)),
+            (jnp.asarray([[1.0]]), *self._grid(knee_slow)),
+        ]
+
+    def test_blocks_keep_their_own_timescales(self):
+        """At a lag between the two decorrelation times, the fast block has
+        lost its correlation and the slow block has not."""
+        e_nom, g = _synthetic_lin(m=2)
+        groups = self._blocks()
+        lag = 200.0  # 1/(2 pi 1e-2) = 16 s << lag << 1/(2 pi 1e-4) = 1592 s
+
+        def eps_at(key):
+            field = grouped_drift_field(e_nom, g, groups, key=key, normalization=1.0)
+            return jnp.stack([field._eps(0.0), field._eps(lag)])
+
+        keys = jax.random.split(jax.random.PRNGKey(5), 3000)
+        eps = np.asarray(jax.vmap(eps_at)(keys))  # (n, 2, m)
+        rho = np.mean(eps[:, 0] * eps[:, 1], axis=0) / np.var(eps[:, 0], axis=0)
+        assert rho[0] < 0.4  # fast block: decorrelated
+        assert rho[1] > 0.85  # slow block: still correlated
+
+    def test_per_block_grids_produce_a_two_dimensional_frequency_axis(self):
+        e_nom, g = _synthetic_lin(m=2)
+        field = grouped_drift_field(
+            e_nom, g, self._blocks(), key=jax.random.PRNGKey(0), normalization=1.0
+        )
+        assert field.frequencies_hz.shape == (2, 48)
+        assert field.amplitudes.shape == (2, 48)
+
+    def test_one_shared_grid_collapses_to_the_single_timescale_case(self):
+        """When every block names the same grid the result is indistinguishable
+        in shape from correlated_drift_field's, so nothing downstream has to
+        care whether a caller used blocks."""
+        e_nom, g = _synthetic_lin(m=2)
+        freqs, psd = self._grid(1e-3)
+        groups = [
+            (jnp.asarray([[1.0]]), freqs, psd),
+            (jnp.asarray([[1.0]]), freqs, psd),
+        ]
+        field = grouped_drift_field(
+            e_nom, g, groups, key=jax.random.PRNGKey(0), normalization=1.0
+        )
+        assert field.frequencies_hz.shape == (48,)
+
+    def test_within_block_covariance_is_realized(self):
+        """A correlated 2x2 block keeps its cross-mode covariance."""
+        e_nom, g = _synthetic_lin(m=2)
+        cov = jnp.asarray([[4.0, 1.5], [1.5, 9.0]])
+        freqs, psd = self._grid(1e-3)
+
+        def eps0(key):
+            field = grouped_drift_field(
+                e_nom, g, [(cov, freqs, psd)], key=key, normalization=1.0
+            )
+            return field._eps(0.0)
+
+        keys = jax.random.split(jax.random.PRNGKey(9), 8000)
+        samples = np.asarray(jax.vmap(eps0)(keys))
+        np.testing.assert_allclose(np.cov(samples.T), np.asarray(cov), atol=0.6)
+
+    def test_mode_count_must_match_g(self):
+        e_nom, g = _synthetic_lin(m=2)
+        freqs, psd = self._grid(1e-3)
+        with pytest.raises(ValueError, match="G has"):
+            grouped_drift_field(
+                e_nom,
+                g,
+                [(jnp.asarray([[1.0]]), freqs, psd)],
+                key=jax.random.PRNGKey(0),
+                normalization=1.0,
+            )
+
+    def test_frequency_counts_must_agree(self):
+        e_nom, g = _synthetic_lin(m=2)
+        with pytest.raises(ValueError, match="frequencies but group 0"):
+            grouped_drift_field(
+                e_nom,
+                g,
+                [
+                    (jnp.asarray([[1.0]]), *self._grid(1e-2, n=48)),
+                    (jnp.asarray([[1.0]]), *self._grid(1e-4, n=32)),
+                ],
+                key=jax.random.PRNGKey(0),
+                normalization=1.0,
+            )
+
+    def test_empty_groups_are_rejected(self):
+        e_nom, g = _synthetic_lin(m=2)
+        with pytest.raises(ValueError, match="at least one"):
+            grouped_drift_field(
+                e_nom, g, [], key=jax.random.PRNGKey(0), normalization=1.0
             )
 
 
