@@ -44,7 +44,7 @@ class TestZwfsReconstruction:
         image = jnp.abs(sensor(aberrated).data) ** 2
         c_hat = zwfs_reconstruct(image, reference, interaction, regularization=1e-12)
         # Linear reconstruction of a nonlinear sensor: recovers to ~10% for
-        # several-nanometre modes (good enough to close a low-order loop).
+        # several-nanometer modes (good enough to close a low-order loop).
         np.testing.assert_allclose(np.asarray(c_hat), np.asarray(c_true), rtol=0.1)
 
     def test_flat_wavefront_reconstructs_near_zero(self):

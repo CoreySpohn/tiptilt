@@ -189,7 +189,7 @@ def _check_times(times_s):
 def _draw_correlated_spectrum(covariance_nm2, key, weights):
     """Draw a correlated spectral realization: per-mode ``(amplitudes, phases)``.
 
-    Colours a circularly-symmetric complex-normal spectrum by a square root of
+    Colors a circularly-symmetric complex-normal spectrum by a square root of
     the target modal covariance so that the synthesized coefficient process
     ``eps_k(t) = sum_j a_kj cos(2 pi f_j t + phi_kj)`` has equal-time covariance
     ``covariance_nm2`` when the temporal ``weights`` sum to 2. The square root is
@@ -525,7 +525,7 @@ class TabulatedSpeckleField(AbstractSpeckleField):
     With ``wavelengths_nm`` set, ``e_nom`` / ``G`` (and optionally
     ``input_energy``) carry a leading channel axis and ``realize`` selects
     the channel nearest the requested wavelength; the tabulated trajectory
-    stays shared across channels (a wavefront error in nanometres is
+    stays shared across channels (a wavefront error in nanometers is
     achromatic). Build the stacks per sub-band for an exact model, or via
     :meth:`broadened` for the lambda-scaling approximation. The cross term
     needs float64 inputs.

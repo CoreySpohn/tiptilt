@@ -581,7 +581,7 @@ class TestPixelWeights:
         rather than just a smaller mask."""
         path, field, mask, grids = _weighted_setup()
         fx_dz, fy_dz = _dz_coords(mask, grids)
-        # A broad preference centred in the zone (posterior-like, sigma ~ 1 l/D).
+        # A broad preference centered in the zone (posterior-like, sigma ~ 1 l/D).
         soft = np.exp(-((fx_dz - 3.0) ** 2 + fy_dz**2) / (2.0 * 1.0**2))
         # The matched hard mask: the same total weight, but binary.
         cut = np.quantile(soft, 1.0 - soft.sum() / soft.size)

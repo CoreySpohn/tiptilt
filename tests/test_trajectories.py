@@ -484,8 +484,8 @@ class TestCreepTrajectory:
         )
         end = traj[:, -1, :]
         np.testing.assert_allclose(end.mean(axis=0), np.asarray(self.RATES), rtol=0.05)
-        centred = end - end.mean(axis=0)
-        skew = (centred**3).mean(axis=0) / centred.std(axis=0) ** 3
+        centered = end - end.mean(axis=0)
+        skew = (centered**3).mean(axis=0) / centered.std(axis=0) ** 3
         expected = 2.0 / np.sqrt(shape)
         np.testing.assert_allclose(skew, [expected, -expected], atol=0.15)
 
@@ -633,7 +633,7 @@ class TestOUExposureNeff:
 
     def test_small_exposures_keep_their_precision(self):
         """Below u ~ 1e-4 the direct form cancels to noise; the series branch
-        holds the exact N_eff - 1 = u/3 behaviour down to u = 1e-12."""
+        holds the exact N_eff - 1 = u/3 behavior down to u = 1e-12."""
         tau = 1.0
         for u in (1e-12, 1e-9, 1e-6, 1e-4, 1e-3):
             got = float(np.asarray(ou_exposure_neff(tau, u))[0])

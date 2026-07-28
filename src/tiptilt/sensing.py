@@ -32,8 +32,8 @@ def probe_set(basis, *, amplitude_nm, n_probes=3, seed=0):
     Args:
         basis: The deformable mirror's ``ModeBasis`` (its ``B`` sets the OPD
             scale of a unit coefficient).
-        amplitude_nm: Per-probe RMS wavefront amplitude in nanometres. Small
-            enough to stay in the linear regime (a few nanometres) yet bright
+        amplitude_nm: Per-probe RMS wavefront amplitude in nanometers. Small
+            enough to stay in the linear regime (a few nanometers) yet bright
             enough for signal to noise.
         n_probes: Number of probes (each applied as a positive and a negative
             pair).
