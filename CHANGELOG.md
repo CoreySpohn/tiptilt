@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.3.0](https://github.com/CoreySpohn/tiptilt/compare/v0.2.0...v0.3.0) (2026-07-28)
+
+
+### Features
+
+* **control:** per-pixel weighted dark-zone objectives through the metric, Jacobian, and solve ([806a1d5](https://github.com/CoreySpohn/tiptilt/commit/806a1d5b9fa19cae51ab48061c30d720d35db127))
+* **speckle:** closed-form exposure averaging count for OU drift ([5387676](https://github.com/CoreySpohn/tiptilt/commit/538767652952a150fbfeb7b355757879bf71b7f5))
+* **speckle:** exact two-time law for OU drift, and the realizability it rests on ([d3384a0](https://github.com/CoreySpohn/tiptilt/commit/d3384a0dc7b3655dda59335f550ed3e1228ca1c2))
+* **speckle:** grouped_drift_field -- mode blocks drifting on their own timescales ([9a59579](https://github.com/CoreySpohn/tiptilt/commit/9a595795122a764e704ecb57e449f33e5b59e592))
+* **speckle:** OU innovation covariance -- what a step cannot predict ([1310c75](https://github.com/CoreySpohn/tiptilt/commit/1310c75cf55cfe02ea0b566ff573cb37ccf46394))
+* **speckle:** replace normalization with input-energy primitives across fields and builders ([4ef1ca8](https://github.com/CoreySpohn/tiptilt/commit/4ef1ca8ccabf3dc028d6097917bf45d5c3c0f289))
+* **speckle:** trajectory builders -- exact OU drift, random walk, one-sided creep ([6847ab1](https://github.com/CoreySpohn/tiptilt/commit/6847ab184db0a14f13d568848ce56fd45f68da1d))
+
+
+### Bug Fixes
+
+* American spelling throughout (nanometres, metre, centred, colour, behaviour) ([6289144](https://github.com/CoreySpohn/tiptilt/commit/6289144d30367d2e3dad4d911304e8a96e1aff00))
+* **speckle:** treat psd as a density, weighting lines by psd*df on the caller's grid ([fc5fbb9](https://github.com/CoreySpohn/tiptilt/commit/fc5fbb9d949d1da7550a2cf288a8a036e26c849c))
+
 ## [0.2.0](https://github.com/CoreySpohn/tiptilt/compare/v0.1.0...v0.2.0) (2026-07-20)
 
 
