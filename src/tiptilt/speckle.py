@@ -35,7 +35,7 @@ replays::
         ou_trajectory(covariance_nm2, timescales_s, key=key, times_s=times_s),
         creep_trajectory(rates_nm_per_s, times_s=times_s),
     )
-    field = TabulatedSpeckleField(e_nom, G, times_s, eps, normalization)
+    field = TabulatedSpeckleField(e_nom, G, times_s, eps, input_energy=e_in)
 """
 
 import warnings
@@ -225,7 +225,7 @@ def correlated_drift_field(
     key,
     frequencies_hz,
     psd,
-    normalization,
+    input_energy,
     pixel_scale_lod=0.25,
     epoch_jd=J2000_JD,
     coherent=False,
@@ -264,7 +264,10 @@ def correlated_drift_field(
         psd: Temporal power spectral density at each frequency, shape ``(f,)``
             (nonnegative, positive total; only its shape matters, it is
             renormalized).
-        normalization: Intensity that maps to unit contrast.
+        input_energy: Total energy of the field handed to the coronagraph
+            train at the pre-coronagraph reference plane
+            (``field.energy()``); the flux-fraction normalization
+            ``input_energy / pixel_scale_lod**2`` is derived at construction.
         pixel_scale_lod: Native pixel scale in lambda/D per pixel.
         epoch_jd: Julian Date mapping to ``time_s = 0``. Default J2000.
         coherent: Include the pinning cross term. Default ``False``.
@@ -304,7 +307,7 @@ def correlated_drift_field(
         amplitudes,
         jnp.asarray(frequencies_hz),
         phases,
-        normalization,
+        input_energy=input_energy,
         pixel_scale_lod=pixel_scale_lod,
         epoch_jd=epoch_jd,
         coherent=coherent,
@@ -317,7 +320,7 @@ def grouped_drift_field(
     groups,
     *,
     key,
-    normalization,
+    input_energy,
     pixel_scale_lod=0.25,
     epoch_jd=J2000_JD,
     coherent=False,
@@ -348,7 +351,9 @@ def grouped_drift_field(
             block needs the same NUMBER of frequencies (they stack into one
             ``(m, f)`` array) but the grids and PSD shapes may differ.
         key: A JAX PRNG key freezing the drawn realization.
-        normalization: Intensity that maps to unit contrast.
+        input_energy: Total energy of the field handed to the coronagraph
+            train at the pre-coronagraph reference plane
+            (``field.energy()``); see :func:`correlated_drift_field`.
         pixel_scale_lod: Native pixel scale in lambda/D per pixel.
         epoch_jd: Julian Date mapping to ``time_s = 0``. Default J2000.
         coherent: Include the pinning cross term. Default ``False``.
@@ -405,7 +410,7 @@ def grouped_drift_field(
         amplitudes,
         frequencies,
         phases,
-        normalization,
+        input_energy=input_energy,
         pixel_scale_lod=pixel_scale_lod,
         epoch_jd=epoch_jd,
         coherent=coherent,
@@ -419,7 +424,6 @@ def correlated_channel_fields(
     key,
     frequencies_hz,
     psd,
-    normalizations,
     local=None,
     epoch_jd=J2000_JD,
     coherent=True,
@@ -435,21 +439,22 @@ def correlated_channel_fields(
     (non-common-path drift) are drawn INDEPENDENTLY per channel and
     appended; they are the part no cross-channel difference removes.
 
-    Normalization is PER CHANNEL (each channel's own reference peak,
-    including its split fraction), so a real split ratio cancels in
-    per-channel contrast. ``coherent=True`` by default -- the common-mode
-    signal is a FIELD effect (the pinning cross term carries it), a
-    deliberate divergence from the single-field default.
+    Photometry derives from the SHARED primitives: every channel references
+    the one entrance-field energy ``mcl.input_energy`` with its own
+    ``pixel_scale_lod``, so a channel's flux-fraction map carries its split
+    fraction inside the map -- the same convention that puts coronagraph mask
+    losses inside a YIP's maps. ``coherent=True`` by default -- the
+    common-mode signal is a FIELD effect (the pinning cross term carries it),
+    a deliberate divergence from the single-field default.
 
     Args:
         mcl: A ``physicaloptix.MultiChannelLinearization`` (the per-channel
-            ``e_nom`` / ``g_shared`` blocks of one shared basis).
+            ``e_nom`` / ``g_shared`` blocks of one shared basis; it records
+            the entrance field's ``input_energy``).
         shared_covariance_nm2: Target ``(m, m)`` shared-mode covariance.
         key: PRNG key freezing the shared draw (and seeding the local ones).
         frequencies_hz: Temporal frequency grid, shape ``(f,)``.
         psd: Temporal PSD shape over those frequencies.
-        normalizations: Dict mapping EVERY channel name to the intensity
-            that maps to unit contrast in that channel.
         local: Optional dict mapping a channel name to ``(g_local,
             covariance_local_nm2)`` -- that channel's independent
             non-common-path block.
@@ -462,15 +467,9 @@ def correlated_channel_fields(
         A dict mapping each channel name to an ``AnalyticSpeckleField``.
 
     Raises:
-        ValueError: If a channel is missing a normalization, or the shared
-            covariance fails ``correlated_drift_field``'s validity checks.
+        ValueError: If the shared covariance fails
+            ``correlated_drift_field``'s validity checks.
     """
-    missing = [name for name in mcl.names if name not in normalizations]
-    if missing:
-        raise ValueError(
-            f"normalizations missing for channel(s) {missing}; every channel "
-            "needs its own reference peak (a split ratio changes it)"
-        )
     power = _line_powers(frequencies_hz, psd, df_weighted)
     weights = jnp.asarray(2.0 * power / float(power.sum()))
 
@@ -498,7 +497,7 @@ def correlated_channel_fields(
             amplitudes,
             jnp.asarray(frequencies_hz),
             phases,
-            normalizations[name],
+            input_energy=mcl.input_energy,
             pixel_scale_lod=channel.pixel_scale_lod,
             epoch_jd=epoch_jd,
             coherent=coherent,
@@ -511,16 +510,20 @@ class TabulatedSpeckleField(AbstractSpeckleField):
 
     ``realize`` interpolates the tabulated ``eps`` at the requested elapsed
     time (holding the endpoints outside the sampled range) and returns the
-    contrast delta ``(I(t) - |E_nom|^2) / normalization``, never the floor
-    itself. With ``coherent=False`` (default) it returns the strictly positive
-    incoherent halo ``|G eps|^2 / normalization``; with ``coherent=True`` it
-    adds the pinning cross term via ``2 Re(E_nom* . G eps) + |G eps|^2``, the
-    numerically stable form of ``|E_nom + G eps|^2 - |E_nom|^2`` (it avoids
-    subtracting two floor-magnitude numbers), and needs the complex ``E_nom``.
+    per-pixel flux-fraction delta ``(I(t) - |E_nom|^2) * du^2 / E_in``, never
+    the floor itself -- the optixstuff ``AbstractSpeckleField`` contract. The
+    photometric primitives are stored (``input_energy``, ``pixel_scale_lod``)
+    and the divisor ``normalization = input_energy / pixel_scale_lod**2`` is
+    derived once at construction. With ``coherent=False`` (default) the delta
+    is the strictly positive incoherent halo ``|G eps|^2``; with
+    ``coherent=True`` it adds the pinning cross term via
+    ``2 Re(E_nom* . G eps) + |G eps|^2``, the numerically stable form of
+    ``|E_nom + G eps|^2 - |E_nom|^2`` (it avoids subtracting two
+    floor-magnitude numbers), and needs the complex ``E_nom``.
 
     Monochromatic by default: ``realize`` then ignores ``wavelength_nm``.
     With ``wavelengths_nm`` set, ``e_nom`` / ``G`` (and optionally
-    ``normalization``) carry a leading channel axis and ``realize`` selects
+    ``input_energy``) carry a leading channel axis and ``realize`` selects
     the channel nearest the requested wavelength; the tabulated trajectory
     stays shared across channels (a wavefront error in nanometres is
     achromatic). Build the stacks per sub-band for an exact model, or via
@@ -532,6 +535,7 @@ class TabulatedSpeckleField(AbstractSpeckleField):
     G: Array  # complex (m, y, x) or (w, m, y, x): d(E_focal)/d(mode)
     times_s: Array  # float (t,): ascending sample times in seconds
     eps_table: Array  # float (t, m): the coefficient trajectory
+    input_energy: Array
     normalization: Array
     pixel_scale_lod: float
     epoch_jd: float
@@ -544,8 +548,8 @@ class TabulatedSpeckleField(AbstractSpeckleField):
         G,
         times_s,
         eps_table,
-        normalization,
         *,
+        input_energy,
         pixel_scale_lod=0.25,
         epoch_jd=J2000_JD,
         coherent=False,
@@ -561,9 +565,10 @@ class TabulatedSpeckleField(AbstractSpeckleField):
                 ``wavelengths_nm`` set.
             times_s: Ascending sample times in seconds, shape ``(t,)``.
             eps_table: Mode coefficients at each sample time, shape ``(t, m)``.
-            normalization: Intensity that maps to unit contrast (the telescope
-                PSF peak the focal field is referenced to); a scalar, or one
-                value per channel for a chromatic field.
+            input_energy: Total energy of the field handed to the coronagraph
+                train at the pre-coronagraph reference plane
+                (``field.energy()``); a scalar, or one value per channel for
+                a chromatic field.
             pixel_scale_lod: Native pixel scale in lambda/D per pixel
                 (shared by every channel: the maps live in lambda/D units).
             epoch_jd: Julian Date mapping to ``time_s = 0``. Default J2000.
@@ -576,8 +581,12 @@ class TabulatedSpeckleField(AbstractSpeckleField):
         self.G = G
         self.times_s = times_s
         self.eps_table = eps_table
-        self.normalization = jnp.asarray(normalization, dtype=float)
+        self.input_energy = jnp.asarray(input_energy, dtype=float)
         self.pixel_scale_lod = pixel_scale_lod
+        # Derived once, eagerly, from the stored primitives (see the
+        # physicaloptix AnalyticSpeckleField); tree_at on input_energy does
+        # not re-derive it.
+        self.normalization = self.input_energy / pixel_scale_lod**2
         self.epoch_jd = epoch_jd
         self.wavelengths_nm = (
             None if wavelengths_nm is None else jnp.asarray(wavelengths_nm, dtype=float)
@@ -597,7 +606,7 @@ class TabulatedSpeckleField(AbstractSpeckleField):
                 "to match eps_table's time axis"
             )
         _check_chromatic_layout(
-            self.e_nom, self.G, self.normalization, self.wavelengths_nm
+            self.e_nom, self.G, self.input_energy, self.wavelengths_nm
         )
         mode_axis = 0 if self.wavelengths_nm is None else 1
         if self.G.shape[mode_axis] != n_modes:
@@ -628,7 +637,7 @@ class TabulatedSpeckleField(AbstractSpeckleField):
         return self._eps(time_s)
 
     def realize(self, *, wavelength_nm, time_s=0.0):
-        """Speckle contrast delta at ``time_s`` (see class docstring)."""
+        """Per-pixel flux-fraction delta at ``time_s`` (see class docstring)."""
         e_nom, g, normalization = _select_channel(
             self.e_nom, self.G, self.normalization, self.wavelengths_nm, wavelength_nm
         )
@@ -665,7 +674,7 @@ class TabulatedSpeckleField(AbstractSpeckleField):
             g_stack,
             self.times_s,
             self.eps_table,
-            self.normalization,
+            input_energy=self.input_energy,
             pixel_scale_lod=self.pixel_scale_lod,
             epoch_jd=self.epoch_jd,
             coherent=self.coherent,

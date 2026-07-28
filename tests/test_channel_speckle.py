@@ -10,9 +10,15 @@ from tiptilt.speckle import TabulatedSpeckleField, correlated_channel_fields
 
 NPIX, M_SHARED = 8, 3
 
+# input_energy / pixel_scale_lod**2 = 1.0: unit flux-fraction normalization
+# for every 0.25-lambda/D channel below.
+_E_IN = 0.25**2
 
-def _synthetic_mcl(key, names=("a", "b")):
+
+def _synthetic_mcl(key, names=("a", "b"), pixel_scales=None):
     """Hand-built two-channel linearization: random blocks, no propagation."""
+    if pixel_scales is None:
+        pixel_scales = {name: 0.25 for name in names}
     channels = []
     for name in names:
         key, key_e, key_g = jax.random.split(key, 3)
@@ -26,11 +32,11 @@ def _synthetic_mcl(key, names=("a", "b")):
         ) * 1e-3
         channels.append(
             ChannelLinearization(
-                name=name, e_nom=e_nom, g_shared=g, pixel_scale_lod=0.25
+                name=name, e_nom=e_nom, g_shared=g, pixel_scale_lod=pixel_scales[name]
             )
         )
     return MultiChannelLinearization(
-        channels=tuple(channels), wavelength_nm=500.0, kind="opd"
+        channels=tuple(channels), wavelength_nm=500.0, kind="opd", input_energy=_E_IN
     )
 
 
@@ -50,7 +56,6 @@ class TestCorrelatedChannelFields:
             key=jax.random.PRNGKey(1),
             frequencies_hz=frequencies,
             psd=psd,
-            normalizations={"a": 1.0, "b": 2.0},
         )
         assert set(fields) == {"a", "b"}
         np.testing.assert_array_equal(
@@ -70,10 +75,11 @@ class TestCorrelatedChannelFields:
             key=jax.random.PRNGKey(1),
             frequencies_hz=frequencies,
             psd=psd,
-            normalizations={"a": 1.0, "b": 2.0},
         )
-        assert float(fields["a"].normalization) == 1.0
-        assert float(fields["b"].normalization) == 2.0
+        for name in ("a", "b"):
+            assert float(fields[name].normalization) == pytest.approx(
+                mcl.input_energy / mcl[name].pixel_scale_lod ** 2
+            )
         np.testing.assert_array_equal(
             np.asarray(fields["a"].G), np.asarray(mcl["a"].g_shared)
         )
@@ -90,7 +96,6 @@ class TestCorrelatedChannelFields:
             key=jax.random.PRNGKey(7),
             frequencies_hz=frequencies,
             psd=psd,
-            normalizations={"a": 1.0, "b": 1.0},
         )
         # Reconstruct the (shared) eps stream from the stored spectrum and
         # accumulate the empirical cross-channel field covariance.
@@ -134,7 +139,6 @@ class TestCorrelatedChannelFields:
             key=jax.random.PRNGKey(1),
             frequencies_hz=frequencies,
             psd=psd,
-            normalizations={"a": 1.0, "b": 1.0},
             local={name: (g_local[name], 0.5 * jnp.eye(2)) for name in ("a", "b")},
         )
         # Shared rows identical; local rows differ (independent draws).
@@ -144,18 +148,24 @@ class TestCorrelatedChannelFields:
         assert not np.allclose(amp_a[M_SHARED:], amp_b[M_SHARED:])
         assert fields["a"].G.shape[0] == M_SHARED + 2
 
-    def test_requires_a_normalization_per_channel(self):
-        mcl = _synthetic_mcl(jax.random.PRNGKey(0))
+    def test_channel_normalization_derives_from_shared_primitives(self):
+        """Two channels with different plate scales get different derived
+        normalizations from the ONE shared entrance energy -- the primitive
+        crosses the seam, never a per-channel hand-fed scalar."""
+        mcl = _synthetic_mcl(jax.random.PRNGKey(0), pixel_scales={"a": 0.25, "b": 0.5})
         frequencies, psd = _white_psd()
-        with pytest.raises(ValueError, match="normalization"):
-            correlated_channel_fields(
-                mcl,
-                jnp.eye(M_SHARED),
-                key=jax.random.PRNGKey(1),
-                frequencies_hz=frequencies,
-                psd=psd,
-                normalizations={"a": 1.0},  # missing "b"
-            )
+        fields = correlated_channel_fields(
+            mcl,
+            jnp.eye(M_SHARED),
+            key=jax.random.PRNGKey(1),
+            frequencies_hz=frequencies,
+            psd=psd,
+        )
+        assert float(fields["a"].normalization) == pytest.approx(_E_IN / 0.25**2)
+        assert float(fields["b"].normalization) == pytest.approx(_E_IN / 0.5**2)
+        assert float(fields["a"].normalization) == pytest.approx(
+            4.0 * float(fields["b"].normalization)
+        )
 
 
 class TestTabulatedEpsAccessor:
@@ -167,7 +177,7 @@ class TestTabulatedEpsAccessor:
             G=jnp.zeros((2, 4, 4), dtype=complex),
             times_s=times,
             eps_table=table,
-            normalization=1.0,
+            input_energy=_E_IN,
         )
         np.testing.assert_allclose(
             np.asarray(field.eps(0.5)), np.asarray([0.5, 1.0]), atol=1e-12
@@ -189,7 +199,6 @@ class TestOptixstuffConformance:
             key=jax.random.PRNGKey(1),
             frequencies_hz=frequencies,
             psd=psd,
-            normalizations={"a": 1.0, "b": 1.0},
         )
         for field in fields.values():
             assert isinstance(field, AbstractSpeckleField)

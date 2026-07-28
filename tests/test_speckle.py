@@ -14,6 +14,11 @@ from tiptilt.speckle import (
 )
 
 
+def _e_in(norm, du=0.25):
+    """input_energy that makes the derived normalization equal ``norm``."""
+    return norm * du * du
+
+
 @pytest.fixture
 def ingredients():
     rng = np.random.default_rng(0)
@@ -25,7 +30,7 @@ def ingredients():
         "G": jnp.asarray(g),
         "times_s": jnp.asarray([0.0, 10.0, 20.0]),
         "eps_table": jnp.asarray([[0.0, 0.0], [1.0, -1.0], [2.0, 0.5]]),
-        "normalization": 3.0,
+        "input_energy": _e_in(3.0),
     }
 
 
@@ -115,7 +120,7 @@ class TestCorrelatedDriftField:
             key=jax.random.PRNGKey(0),
             frequencies_hz=freqs,
             psd=psd,
-            normalization=1.0,
+            input_energy=_e_in(1.0),
         )
         from physicaloptix import AnalyticSpeckleField
 
@@ -139,7 +144,7 @@ class TestCorrelatedDriftField:
             key=jax.random.PRNGKey(3),
             frequencies_hz=freqs,
             psd=psd,
-            normalization=1.0,
+            input_energy=_e_in(1.0),
         )
         first = correlated_drift_field(*args, **kw)
         second = correlated_drift_field(*args, **kw)
@@ -171,7 +176,7 @@ class TestCorrelatedDriftField:
                 key=jax.random.PRNGKey(0),
                 frequencies_hz=jnp.linspace(1e-4, 1e-2, 8),
                 psd=psd,
-                normalization=1.0,
+                input_energy=_e_in(1.0),
             )
 
     def test_rejects_indefinite_covariance(self):
@@ -185,7 +190,7 @@ class TestCorrelatedDriftField:
                 key=jax.random.PRNGKey(0),
                 frequencies_hz=jnp.linspace(1e-4, 1e-2, 8),
                 psd=jnp.ones(8),
-                normalization=1.0,
+                input_energy=_e_in(1.0),
             )
 
     def test_rejects_asymmetric_covariance(self):
@@ -199,7 +204,7 @@ class TestCorrelatedDriftField:
                 key=jax.random.PRNGKey(0),
                 frequencies_hz=jnp.linspace(1e-4, 1e-2, 8),
                 psd=jnp.ones(8),
-                normalization=1.0,
+                input_energy=_e_in(1.0),
             )
 
     def test_warns_when_neff_is_low(self):
@@ -216,7 +221,7 @@ class TestCorrelatedDriftField:
                 key=jax.random.PRNGKey(0),
                 frequencies_hz=jnp.linspace(1e-4, 1e-2, 8),
                 psd=red,
-                normalization=1.0,
+                input_energy=_e_in(1.0),
             )
 
 
@@ -251,7 +256,7 @@ class TestPsdIsADensity:
                 key=key,
                 frequencies_hz=freqs,
                 psd=psd,
-                normalization=1.0,
+                input_energy=_e_in(1.0),
                 df_weighted=df_weighted,
             )
             return jnp.stack([field._eps(float(t))[0] for t in [0.0, *lags]])
@@ -303,7 +308,7 @@ class TestPsdIsADensity:
                 key=jax.random.PRNGKey(0),
                 frequencies_hz=jnp.linspace(1e-4, 1e-2, 8),
                 psd=jnp.ones(7),
-                normalization=1.0,
+                input_energy=_e_in(1.0),
             )
 
 
@@ -333,7 +338,9 @@ class TestGroupedDriftField:
         lag = 200.0  # 1/(2 pi 1e-2) = 16 s << lag << 1/(2 pi 1e-4) = 1592 s
 
         def eps_at(key):
-            field = grouped_drift_field(e_nom, g, groups, key=key, normalization=1.0)
+            field = grouped_drift_field(
+                e_nom, g, groups, key=key, input_energy=_e_in(1.0)
+            )
             return jnp.stack([field._eps(0.0), field._eps(lag)])
 
         keys = jax.random.split(jax.random.PRNGKey(5), 3000)
@@ -345,7 +352,7 @@ class TestGroupedDriftField:
     def test_per_block_grids_produce_a_two_dimensional_frequency_axis(self):
         e_nom, g = _synthetic_lin(m=2)
         field = grouped_drift_field(
-            e_nom, g, self._blocks(), key=jax.random.PRNGKey(0), normalization=1.0
+            e_nom, g, self._blocks(), key=jax.random.PRNGKey(0), input_energy=_e_in(1.0)
         )
         assert field.frequencies_hz.shape == (2, 48)
         assert field.amplitudes.shape == (2, 48)
@@ -361,7 +368,7 @@ class TestGroupedDriftField:
             (jnp.asarray([[1.0]]), freqs, psd),
         ]
         field = grouped_drift_field(
-            e_nom, g, groups, key=jax.random.PRNGKey(0), normalization=1.0
+            e_nom, g, groups, key=jax.random.PRNGKey(0), input_energy=_e_in(1.0)
         )
         assert field.frequencies_hz.shape == (48,)
 
@@ -373,7 +380,7 @@ class TestGroupedDriftField:
 
         def eps0(key):
             field = grouped_drift_field(
-                e_nom, g, [(cov, freqs, psd)], key=key, normalization=1.0
+                e_nom, g, [(cov, freqs, psd)], key=key, input_energy=_e_in(1.0)
             )
             return field._eps(0.0)
 
@@ -390,7 +397,7 @@ class TestGroupedDriftField:
                 g,
                 [(jnp.asarray([[1.0]]), freqs, psd)],
                 key=jax.random.PRNGKey(0),
-                normalization=1.0,
+                input_energy=_e_in(1.0),
             )
 
     def test_frequency_counts_must_agree(self):
@@ -404,14 +411,14 @@ class TestGroupedDriftField:
                     (jnp.asarray([[1.0]]), *self._grid(1e-4, n=32)),
                 ],
                 key=jax.random.PRNGKey(0),
-                normalization=1.0,
+                input_energy=_e_in(1.0),
             )
 
     def test_empty_groups_are_rejected(self):
         e_nom, g = _synthetic_lin(m=2)
         with pytest.raises(ValueError, match="at least one"):
             grouped_drift_field(
-                e_nom, g, [], key=jax.random.PRNGKey(0), normalization=1.0
+                e_nom, g, [], key=jax.random.PRNGKey(0), input_energy=_e_in(1.0)
             )
 
 
@@ -459,7 +466,7 @@ class TestPhysicaloptixIntegration:
             lin.G,
             times,
             eps_table,
-            normalization=float(jnp.abs(lin.e_nom).max() ** 2),
+            input_energy=lin.input_energy,
         )
         out = speckle.realize(wavelength_nm=500.0, time_s=50.0)
         assert out.shape == (32, 32)
@@ -507,6 +514,6 @@ class TestChromaticTabulatedField:
                 chrom.G[:, :1],  # drop a mode: mismatch with eps_table
                 ingredients["times_s"],
                 ingredients["eps_table"],
-                1.0,
+                input_energy=_e_in(1.0),
                 wavelengths_nm=[450.0, 900.0],
             )

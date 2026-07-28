@@ -550,7 +550,7 @@ class TestFeedsATabulatedField:
             ),
             creep_trajectory(jnp.asarray([1e-5, 0.0]), times_s=times),
         )
-        field = TabulatedSpeckleField(e_nom, g, times, eps_table, 1.0)
+        field = TabulatedSpeckleField(e_nom, g, times, eps_table, input_energy=0.25**2)
         early = field.realize(wavelength_nm=500.0, time_s=0.0)
         late = field.realize(wavelength_nm=500.0, time_s=3000.0)
         assert early.shape == (ny, nx)
@@ -722,7 +722,7 @@ class TestExposureAveragingOnARealField:
         rng = np.random.default_rng(5)
         g = jnp.asarray(rng.standard_normal((2, 4, 4)) * (1 + 1j))
         e_nom = jnp.asarray(rng.standard_normal((4, 4)) * (1 + 1j))
-        return TabulatedSpeckleField(e_nom, g, times, eps_table, 1.0)
+        return TabulatedSpeckleField(e_nom, g, times, eps_table, input_energy=0.25**2)
 
     def test_matches_the_hand_averaged_midpoints(self):
         times = jnp.asarray(np.linspace(0.0, 400.0, 41))

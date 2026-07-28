@@ -107,7 +107,6 @@ def test_realized_field_matches_direct_propagation():
         1,
         mask,
         drift=_ramp_drift(),
-        normalization=1.0,
         command0=command0,
         **COMMON,
     )
@@ -129,8 +128,10 @@ def test_realized_field_matches_direct_propagation():
             (eps(k * COMMON["dt_s"]), trajectory[k]),
         )
         out, _ = drifted.propagate(field)
-        direct = jnp.abs(out.data) ** 2
-        linear = jnp.abs(residual.e_nom) ** 2 + residual.realize(
+        # compare in the seam's flux-fraction units: floor + delta == full
+        norm = residual.normalization
+        direct = jnp.abs(out.data) ** 2 / norm
+        linear = jnp.abs(residual.e_nom) ** 2 / norm + residual.realize(
             wavelength_nm=WL, time_s=k * COMMON["dt_s"]
         )
         err = jnp.linalg.norm(linear - direct) / jnp.linalg.norm(direct)
@@ -140,7 +141,7 @@ def test_realized_field_matches_direct_propagation():
 def test_seam_contract_and_closed_beats_open():
     path, field, mask = _setup()
     command0 = _dug_command0(path, field, mask)
-    kwargs = dict(drift=_ramp_drift(), normalization=1.0, command0=command0)
+    kwargs = dict(drift=_ramp_drift(), command0=command0)
     closed, _ = maintained_residual_field(path, field, 1, mask, **kwargs, **COMMON)
     open_kwargs = {**COMMON, "gain": 0.0}
     opened, _ = maintained_residual_field(path, field, 1, mask, **kwargs, **open_kwargs)

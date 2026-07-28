@@ -247,7 +247,6 @@ def maintained_residual_field(
     dt_s,
     gain,
     regularization,
-    normalization=1.0,
     pixel_scale_lod=0.25,
     epoch_jd=J2000_JD,
     coherent=True,
@@ -287,8 +286,6 @@ def maintained_residual_field(
         dt_s: Seconds per frame.
         gain: Loop gain (0 = the open-loop reference field).
         regularization: Tikhonov term of the default EFC controller.
-        normalization: Intensity mapping to unit contrast (the telescope
-            PSF peak the imaging layer references).
         pixel_scale_lod: Native focal pixel scale in lambda/D per pixel.
         epoch_jd: Julian Date mapping to ``time_s = 0``.
         coherent: Include the pinning cross term (default True).
@@ -343,12 +340,15 @@ def maintained_residual_field(
     times_s = dt_s * jnp.arange(n_steps)
     drift_table = jnp.stack([jnp.asarray(eps_of(float(t))) for t in times_s])
     eps_table = jnp.concatenate([drift_table, trajectory - command0], axis=1)
+    # The entrance field is in hand, so the photometric reference is derived
+    # here rather than asked of the caller: realized maps are per-pixel flux
+    # fractions of the pre-coronagraph input energy.
     field = TabulatedSpeckleField(
         e_nom,
         sensitivity,
         times_s,
         eps_table,
-        normalization,
+        input_energy=float(input_field.energy()),
         pixel_scale_lod=pixel_scale_lod,
         epoch_jd=epoch_jd,
         coherent=coherent,
