@@ -124,6 +124,7 @@ class DarkZoneModel(eqx.Module):
         jacobian_field,
         operating_point=None,
         pixel_weights=None,
+        materialize_jacobian=True,
     ):
         """Linearize a path's dark zone about an operating point.
 
@@ -146,6 +147,11 @@ class DarkZoneModel(eqx.Module):
                 intended pattern is rebuilding the model per visit. A pixel
                 weighted zero leaves the solve entirely, which also removes it
                 from what the Tikhonov regularization sees.
+            materialize_jacobian: Build the dense ``g_dz`` by ``jacfwd``
+                (default). ``False`` leaves ``g_dz`` as an EMPTY
+                ``(0, n_total)`` placeholder for the matrix-free controller,
+                which linearizes on demand instead; the dense controllers
+                refuse such a model.
 
         Returns:
             A ``DarkZoneModel``.
@@ -219,10 +225,29 @@ class DarkZoneModel(eqx.Module):
             g_dz=jnp.zeros((0, n_total)),  # placeholder, replaced below
             operating_point=operating_point,
         )
+        if not materialize_jacobian:
+            return model
         g_dz = jax.jacfwd(
             lambda c: weighted_dark_zone(model.focal_of(c, jacobian_field))
         )(operating_point)
         return eqx.tree_at(lambda m: m.g_dz, model, g_dz)
+
+    @property
+    def has_jacobian(self):
+        """Whether the dense ``g_dz`` was materialized."""
+        return self.g_dz.shape[0] > 0
+
+    def weighted_dark_zone(self, data):
+        """The sqrt-weighted stacked dark-zone vector (the Jacobian's rows)."""
+        return self.stack_weights * self.dark_zone_unweighted(data)
+
+
+def _require_jacobian(model, law):
+    if not model.has_jacobian:
+        raise ValueError(
+            f"{law} needs a materialized Jacobian; build the DarkZoneModel with "
+            "materialize_jacobian=True or use MatrixFreeEFCController"
+        )
 
 
 class AbstractController(eqx.Module):
@@ -271,6 +296,7 @@ class EFCController(AbstractController):
         """
         if regularization <= 0.0:
             raise ValueError(f"regularization must be positive, got {regularization}")
+        _require_jacobian(model, "EFCController")
         response = jnp.concatenate([jnp.real(model.g_dz), jnp.imag(model.g_dz)], axis=0)
         gram = response.T @ response + regularization * jnp.eye(model.n_total)
         return cls(
@@ -329,6 +355,7 @@ class StrokeMinController(AbstractController):
         """
         if mu_grid is None:
             mu_grid = jnp.logspace(-12, 0, 13)
+        _require_jacobian(model, "StrokeMinController")
         response = jnp.concatenate([jnp.real(model.g_dz), jnp.imag(model.g_dz)], axis=0)
         n_dark = int(jnp.sum(model.mask))
         return cls(
@@ -363,6 +390,118 @@ class StrokeMinController(AbstractController):
         deepest = jnp.argmin(contrasts)
         chosen = jnp.where(jnp.any(feasible), least_stroke, deepest)
         return self, self.gain * deltas[chosen]
+
+
+class MatrixFreeEFCController(AbstractController):
+    """Electric-field conjugation that never stores the Jacobian.
+
+    The same regularized real least squares as :class:`EFCController`, but the
+    normal equations ``(R^T R + reg I) delta = -R^T residual`` are solved by
+    conjugate gradients with the two matrix-vector products supplied by
+    autodiff: ``R v`` is the linearized propagation (``jax.linearize`` at the
+    controller's ``command``) and ``R^T w`` its transpose. Nothing of size
+    ``(n_stack, n_total)`` ever exists, which is what a flight-scale mirror
+    (tens of thousands of actuators against tens of thousands of dark-zone
+    pixels per wavelength) needs. Each solve costs ``2 * max_iterations``
+    linearized propagations instead of one dense factorization, and the
+    controller RE-LINEARIZES wherever it is pointed (``relinearize``), so it
+    doubles as a relinearizing EFC for large excursions.
+
+    The linearization point is state (``command``); ``command_delta`` is
+    otherwise stateless, so the seam contract holds.
+
+    Jitting a step that closes over the controller embeds the path's arrays
+    as compile-time constants; at large pupils XLA's constant folder then
+    evaluates the MFT kernel products with its slow single-threaded
+    evaluator (tens of CPU-minutes at 2048 px). Set
+    ``XLA_FLAGS=--xla_disable_hlo_passes=constant_folding`` before the
+    backend initializes when driving this law at scale.
+
+    Attributes:
+        model: The ``DarkZoneModel`` (its path, mask, and weights; ``g_dz``
+            may be empty).
+        field: The entrance field the linearization is taken on.
+        command: The stacked command the controller is linearized at.
+        gain: Loop gain (a differentiable leaf).
+        regularization: Positive Tikhonov term.
+        max_iterations: Conjugate-gradient iteration cap per solve.
+        tol: Conjugate-gradient relative tolerance.
+    """
+
+    model: DarkZoneModel
+    field: eqx.Module
+    command: Array
+    gain: Array
+    regularization: float = eqx.field(static=True)
+    max_iterations: int = eqx.field(static=True)
+    tol: float = eqx.field(static=True)
+
+    @classmethod
+    def build(
+        cls,
+        model,
+        *,
+        jacobian_field,
+        gain,
+        regularization,
+        max_iterations=100,
+        tol=1e-6,
+        operating_point=None,
+    ):
+        """The matrix-free EFC law for a dark-zone model.
+
+        Args:
+            model: The ``DarkZoneModel`` (dense ``g_dz`` not required).
+            jacobian_field: The entrance field to linearize on.
+            gain: Loop gain.
+            regularization: Positive Tikhonov term.
+            max_iterations: Conjugate-gradient iteration cap per solve.
+            tol: Conjugate-gradient relative tolerance.
+            operating_point: Initial linearization command; defaults to the
+                model's.
+
+        Returns:
+            A ``MatrixFreeEFCController``.
+        """
+        if regularization <= 0.0:
+            raise ValueError(f"regularization must be positive, got {regularization}")
+        if max_iterations < 1:
+            raise ValueError(f"max_iterations must be >= 1, got {max_iterations}")
+        command = model.operating_point if operating_point is None else operating_point
+        return cls(
+            model=model,
+            field=jacobian_field,
+            command=jnp.asarray(command),
+            gain=jnp.asarray(gain),
+            regularization=float(regularization),
+            max_iterations=int(max_iterations),
+            tol=float(tol),
+        )
+
+    def relinearize(self, command):
+        """The same law linearized at ``command``."""
+        return eqx.tree_at(lambda c: c.command, self, jnp.asarray(command))
+
+    def _stacked(self, command):
+        data = self.model.focal_of(command, self.field)
+        weighted = self.model.weighted_dark_zone(data)
+        return jnp.concatenate([jnp.real(weighted), jnp.imag(weighted)])
+
+    def command_delta(self, estimate):
+        """Solve the regularized normal equations by CG on jvp/vjp products."""
+        _, jvp_fn = jax.linearize(self._stacked, self.command)
+        vjp_fn = jax.linear_transpose(jvp_fn, self.command)
+
+        def normal(v):
+            return vjp_fn(jvp_fn(v))[0] + self.regularization * v
+
+        weighted = self.model.stack_weights * estimate.reshape(-1)
+        residual = jnp.concatenate([jnp.real(weighted), jnp.imag(weighted)])
+        rhs = -vjp_fn(residual)[0]
+        delta, _ = jax.scipy.sparse.linalg.cg(
+            normal, rhs, maxiter=self.max_iterations, tol=self.tol
+        )
+        return self, self.gain * delta
 
 
 class PredictiveController(AbstractController):
@@ -437,17 +576,24 @@ def close_dark_hole(
     detector=None,
     key=None,
     pixel_weights=None,
+    jacobian="dense",
+    cg_iterations=100,
+    cg_tol=1e-6,
 ):
     """Dig a dark hole with deformable mirrors by electric-field conjugation.
 
-    Linearizes the focal field with respect to the stacked DM command ONCE (the
-    control Jacobian is constant to first order in the small-signal dark-hole
-    regime), builds a regularized real control matrix, then runs a differentiable
-    ``lax.scan`` that RE-PROPAGATES for the measurement and updates the command
-    each step by swapping every DM's coefficients with ``eqx.tree_at`` -- never a
-    reconstruction, which would re-run the propagator's construction-time gates.
-    Because every propagation is a pure function, the loop differentiates through
-    the feedback (e.g. the final contrast with respect to the loop gain).
+    By default linearizes the focal field with respect to the stacked DM command
+    ONCE (the control Jacobian is constant to first order in the small-signal
+    dark-hole regime), builds a regularized real control matrix, then runs a
+    differentiable ``lax.scan`` that RE-PROPAGATES for the measurement and updates
+    the command each step by swapping every DM's coefficients with
+    ``eqx.tree_at`` -- never a reconstruction, which would re-run the propagator's
+    construction-time gates. Because every propagation is a pure function, the
+    loop differentiates through the feedback (e.g. the final contrast with
+    respect to the loop gain). ``jacobian="matrix-free"`` replaces the stored
+    control matrix with :class:`MatrixFreeEFCController` (re-linearized every
+    step, nothing of Jacobian size stored) for mirrors too large to
+    materialize; that loop is Python-unrolled.
 
     With one pupil DM the loop reaches only the PHASE quadrature, so it corrects a
     one-sided dark zone and floors on any amplitude speckle. Adding a second,
@@ -510,6 +656,13 @@ def close_dark_hole(
         pixel_weights: Optional per-dark-zone-pixel weights passed through to
             :meth:`DarkZoneModel.build`, so the loop digs where the weight is
             rather than uniformly across the mask. Uniform by default.
+        jacobian: ``"dense"`` (the ``jacfwd`` control matrix, built once) or
+            ``"matrix-free"`` (:class:`MatrixFreeEFCController`: CG on
+            autodiff products, re-linearized at every step, nothing of
+            Jacobian size stored). Matrix-free loops are Python-unrolled and
+            do not support the Kalman estimator (it needs the dense model).
+        cg_iterations: Matrix-free only: CG iteration cap per solve.
+        cg_tol: Matrix-free only: CG relative tolerance.
 
     Returns:
         ``(command, dark_zone_history)``: the final stacked DM command (the DMs'
@@ -519,8 +672,9 @@ def close_dark_hole(
     Raises:
         TypeError: If any ``dm_indices`` stage is not a ``PhaseScreen``.
         ValueError: If ``regularization`` is not positive, the dark zone is
-            empty, ``estimator`` is unknown, or an estimated loop is missing
-            ``probes``.
+            empty, ``estimator`` or ``jacobian`` is unknown, an estimated loop
+            is missing ``probes``, or the Kalman estimator is combined with
+            ``jacobian="matrix-free"``.
     """
     indices = (dm_indices,) if isinstance(dm_indices, int) else tuple(dm_indices)
     if estimator not in ("oracle", "pairwise", "kalman"):
@@ -533,6 +687,11 @@ def close_dark_hole(
             raise ValueError(f"estimator={estimator!r} requires probes")
         if probe_dm is None:
             probe_dm = indices[0]
+    if jacobian not in ("dense", "matrix-free"):
+        raise ValueError(f"jacobian must be 'dense' or 'matrix-free', got {jacobian!r}")
+    matrix_free = jacobian == "matrix-free"
+    if matrix_free and estimator == "kalman":
+        raise ValueError("the kalman estimator needs a dense Jacobian")
     # The control Jacobian is known from the model; the honest estimated loop
     # builds it on the unaberrated model field, not the (unknown) true field.
     jacobian_field = (
@@ -544,8 +703,38 @@ def close_dark_hole(
         dark_zone_mask,
         jacobian_field=jacobian_field,
         pixel_weights=pixel_weights,
+        materialize_jacobian=not matrix_free,
     )
-    controller = EFCController.build(dz_model, gain=gain, regularization=regularization)
+    if matrix_free:
+        controller = MatrixFreeEFCController.build(
+            dz_model,
+            jacobian_field=jacobian_field,
+            gain=gain,
+            regularization=regularization,
+            max_iterations=cg_iterations,
+            tol=cg_tol,
+        )
+    else:
+        controller = EFCController.build(
+            dz_model, gain=gain, regularization=regularization
+        )
+
+    if matrix_free and not estimated:
+        # The controller (and its model's boolean mask) is a closure constant,
+        # not a jit argument, so the mask indexing stays concrete.
+        @eqx.filter_jit
+        def mf_step(command):
+            data = dz_model.focal_of(command, input_field)
+            estimate = dz_model.dark_zone_unweighted(data)
+            _, delta = controller.relinearize(command).command_delta(estimate)
+            return command + delta, dz_model.contrast(data)
+
+        command = jnp.zeros(dz_model.n_total)
+        history = []
+        for _ in range(n_steps):
+            command, contrast = mf_step(command)
+            history.append(contrast)
+        return command, jnp.stack(history)
 
     if estimated:
         # Probe-and-estimate loops: Python-unrolled (still a pure composition,
@@ -579,6 +768,8 @@ def close_dark_hole(
         for i in range(n_steps):
             history.append(dz_model.contrast(dz_model.focal_of(command, input_field)))
             sensor, e_hat = sensor.estimate(dz_model, command, key=keys[i])
+            if matrix_free:
+                controller = controller.relinearize(command)
             controller, delta = controller.command_delta(e_hat)
             command = command + delta
         return command, jnp.stack(history)

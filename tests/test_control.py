@@ -19,7 +19,13 @@ from physicaloptix import (
     fourier_dm_basis,
 )
 
-from tiptilt.control import DarkZoneModel, EFCController, close_dark_hole
+from tiptilt.control import (
+    DarkZoneModel,
+    EFCController,
+    MatrixFreeEFCController,
+    StrokeMinController,
+    close_dark_hole,
+)
 from tiptilt.sensing import probe_set
 
 WL = 500.0
@@ -188,6 +194,93 @@ class TestTwoDeformableMirrors:
         assert hist_one[-1] > 0.8 * hist_one[0]  # one DM cannot null it broadband
         assert hist_two[-1] < 0.6 * hist_two[0]  # two DMs reduce the band contrast
         assert hist_two[-1] < 0.6 * hist_one[-1]  # the broadband two-DM advantage
+
+
+class TestMatrixFreeEFC:
+    def test_delta_matches_the_dense_law(self):
+        """CG on jvp/vjp products solves the SAME regularized normal equations
+        as the dense control matrix, so the two deltas agree to CG tolerance."""
+        path, field, mask = _relay_setup()
+        dense_model = DarkZoneModel.build(path, (0, 2), mask, jacobian_field=field)
+        free_model = DarkZoneModel.build(
+            path, (0, 2), mask, jacobian_field=field, materialize_jacobian=False
+        )
+        assert dense_model.has_jacobian and not free_model.has_jacobian
+        estimate = dense_model.dark_zone_unweighted(
+            dense_model.focal_of(jnp.zeros(dense_model.n_total), field)
+        )
+        _, dense_delta = EFCController.build(
+            dense_model, gain=1.0, regularization=1e-4
+        ).command_delta(estimate)
+        _, free_delta = MatrixFreeEFCController.build(
+            free_model,
+            jacobian_field=field,
+            gain=1.0,
+            regularization=1e-4,
+            max_iterations=500,
+            tol=1e-10,
+        ).command_delta(estimate)
+        assert jnp.linalg.norm(free_delta - dense_delta) < 1e-6 * jnp.linalg.norm(
+            dense_delta
+        )
+
+    def test_dense_laws_refuse_an_unmaterialized_model(self):
+        path, field, mask = _relay_setup()
+        free_model = DarkZoneModel.build(
+            path, (0, 2), mask, jacobian_field=field, materialize_jacobian=False
+        )
+        with pytest.raises(ValueError, match="materialized Jacobian"):
+            EFCController.build(free_model, gain=1.0, regularization=1e-4)
+        with pytest.raises(ValueError, match="materialized Jacobian"):
+            StrokeMinController.build(free_model, target_contrast=1e-8)
+
+    @pytest.mark.slow
+    def test_matrix_free_loop_digs_like_the_dense_loop(self):
+        path, field, mask = _relay_setup()
+        _, hist_dense = close_dark_hole(
+            path, field, (0, 2), mask, n_steps=12, gain=0.5, regularization=1e-7
+        )
+        _, hist_free = close_dark_hole(
+            path,
+            field,
+            (0, 2),
+            mask,
+            n_steps=12,
+            gain=0.5,
+            regularization=1e-7,
+            jacobian="matrix-free",
+            cg_iterations=300,
+            cg_tol=1e-9,
+        )
+        assert hist_free[-1] < 1e-4 * hist_free[0]
+        assert hist_free[-1] < 3.0 * hist_dense[-1]
+
+    def test_rejects_kalman_and_unknown_jacobian(self):
+        path, field, mask = _relay_setup()
+        with pytest.raises(ValueError, match="jacobian must be"):
+            close_dark_hole(
+                path,
+                field,
+                (0, 2),
+                mask,
+                n_steps=1,
+                gain=0.5,
+                regularization=1e-6,
+                jacobian="sparse",
+            )
+        with pytest.raises(ValueError, match="kalman"):
+            close_dark_hole(
+                path,
+                field,
+                (0, 2),
+                mask,
+                n_steps=1,
+                gain=0.5,
+                regularization=1e-6,
+                jacobian="matrix-free",
+                estimator="kalman",
+                probes=[jnp.zeros(path.stages[0].op.basis.n_modes)],
+            )
 
 
 class TestCloseDarkHole:
