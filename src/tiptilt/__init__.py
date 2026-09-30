@@ -33,7 +33,13 @@ from tiptilt.control import (
     StrokeMinController,
     close_dark_hole,
 )
-from tiptilt.dm import DeformableMirror, HardwareDM, dm_influence_basis
+from tiptilt.dm import (
+    ActuatorDM,
+    ActuatorLattice,
+    DeformableMirror,
+    HardwareDM,
+    dm_influence_basis,
+)
 from tiptilt.lowfs import lowfs_calibrate, run_pointing_loop
 from tiptilt.maintenance import (
     maintain_dark_hole,
@@ -96,6 +102,8 @@ __all__ = [
     "ALGORITHMS",
     "AbstractController",
     "AbstractEstimator",
+    "ActuatorDM",
+    "ActuatorLattice",
     "DarkZoneModel",
     "DeformableMirror",
     "EFCController",

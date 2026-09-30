@@ -14,7 +14,12 @@ from physicaloptix import (
 )
 
 from tiptilt.control import close_dark_hole
-from tiptilt.dm import DeformableMirror, dm_influence_basis
+from tiptilt.dm import (
+    ActuatorDM,
+    ActuatorLattice,
+    DeformableMirror,
+    dm_influence_basis,
+)
 
 WL = 500.0
 
@@ -151,6 +156,90 @@ class TestDeformableMirror:
         # cannot exactly reproduce a Fourier cosine), so the floor sits at
         # the representation residual rather than machine depth.
         assert float(history[-1]) < 0.1 * float(history[0])
+
+
+class TestActuatorLattice:
+    def test_matches_the_explicit_gaussian_sum(self):
+        """The FFT-evaluated surface IS the sum of Gaussian influence
+        functions: compare against the explicit per-actuator sum for a
+        lattice well inside the array (no periodic wrap)."""
+        grid = Grid.pupil(64)
+        n, pitch, coupling = 6, 0.08, 0.15
+        lattice = ActuatorLattice.build(
+            grid, n_across=n, pitch=pitch, coupling=coupling, center=(0.01, -0.02)
+        )
+        command = jnp.asarray(np.random.default_rng(0).normal(size=n * n))
+        surface = np.asarray(lattice.surface(command))
+        x = np.asarray(grid.coords)
+        xg, yg = np.meshgrid(x, x)
+        centers = np.asarray(lattice.centers)
+        explicit = sum(
+            float(command[a])
+            * np.exp(np.log(coupling) * ((xg - cx) ** 2 + (yg - cy) ** 2) / pitch**2)
+            for a, (cx, cy) in enumerate(centers)
+        )
+        assert np.linalg.norm(surface - explicit) < 1e-9 * np.linalg.norm(explicit)
+        assert lattice.n_modes == n * n
+        assert lattice.B.shape == (0, 64, 64)  # modes are never materialized
+
+    def test_axis_order_is_row_major_y_x(self):
+        """Poking the (row 0, column n-1) actuator moves the surface peak to
+        the most negative y and most positive x."""
+        grid = Grid.pupil(64)
+        n = 4
+        lattice = ActuatorLattice.build(grid, n_across=n, pitch=0.1)
+        command = jnp.zeros(n * n).at[n - 1].set(1.0)
+        surface = np.asarray(lattice.surface(command))
+        iy, ix = np.unravel_index(np.argmax(surface), surface.shape)
+        coords = np.asarray(grid.coords)
+        assert coords[ix] > 0.1 and coords[iy] < -0.1
+        # A 1 nm poke; in this geometry the peak sample sits ~0.1 px off the
+        # actuator center (a half-pixel miss would read 0.977).
+        assert surface.max() == pytest.approx(1.0, rel=2e-3)
+
+    def test_actuator_dm_is_a_phase_screen_that_the_driver_commands(self):
+        """ActuatorDM drops into close_dark_hole unchanged (it is a
+        PhaseScreen commanded through ``basis.coeffs``) and digs a hole with
+        the same fitting-error floor the dense device shows."""
+        npix = 32
+        grid = Grid.pupil(npix)
+        focal = Grid.focal(48, 0.4)
+        n = 12
+        dm = ActuatorDM.build(grid, n_across=n, pitch=1.0 / n, wavelength_nm=WL)
+        assert isinstance(dm, PhaseScreen)
+        x = np.asarray(grid.coords)
+        xg, yg = np.meshgrid(x, x)
+        aperture = (xg**2 + yg**2 <= 0.25).astype(float)
+        opd = 3.0 * np.cos(2 * np.pi * (3 * xg + yg))
+        field = Field(
+            data=jnp.asarray(aperture * np.exp(1j * 2 * np.pi * opd / WL)),
+            grid=grid,
+            plane=PlaneKind.PUPIL,
+        )
+        path = OpticalPath(
+            stages=(
+                Stage("dm", dm),
+                Stage("science", Fraunhofer(grid_in=grid, grid_out=focal)),
+            )
+        )
+        fx = np.asarray(focal.coords)
+        fxg, fyg = np.meshgrid(fx, fx)
+        mask = jnp.asarray((np.abs(fxg - 3.0) < 0.8) & (np.abs(fyg - 1.0) < 0.8))
+        command, history = close_dark_hole(
+            path, field, 0, mask, n_steps=12, gain=0.6, regularization=1e-6
+        )
+        assert command.shape == (n * n,)
+        assert float(history[-1]) < 0.1 * float(history[0])
+        assert np.asarray(dm.surface(command)).shape == (npix, npix)
+
+    def test_rejects_a_mismatched_grid_and_bad_parameters(self):
+        lattice = ActuatorLattice.build(Grid.pupil(16), n_across=4, pitch=0.2)
+        with pytest.raises(ValueError, match="does not match grid"):
+            ActuatorDM(lattice, Grid.pupil(32), wavelength_nm=WL)
+        with pytest.raises(ValueError, match="coupling"):
+            ActuatorLattice.build(Grid.pupil(16), n_across=4, pitch=0.2, coupling=1.5)
+        with pytest.raises(ValueError, match="pitch"):
+            ActuatorLattice.build(Grid.pupil(16), n_across=4, pitch=0.0)
 
 
 def _pupil_setup(npix=24, n_actuators=8, **hardware):

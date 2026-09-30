@@ -44,6 +44,11 @@ def probe_set(basis, *, amplitude_nm, n_probes=3, seed=0):
     """
     modes = basis.B
     n_modes = modes.shape[0]
+    if n_modes == 0:
+        raise ValueError(
+            "probe_set needs a dense mode stack; this basis stores none "
+            "(an ActuatorLattice) so build its probes from actuator commands"
+        )
     probes = []
     for key in jax.random.split(jax.random.PRNGKey(seed), n_probes):
         coeffs = jax.random.normal(key, (n_modes,))

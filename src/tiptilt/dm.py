@@ -313,4 +313,199 @@ class DeformableMirror(eqx.Module):
         return jnp.tensordot(command, self.screen.basis.B, axes=1)
 
 
-__all__ = ["DeformableMirror", "HardwareDM", "dm_influence_basis"]
+class ActuatorLattice(eqx.Module):
+    """An actuator-lattice OPD basis evaluated by Fourier convolution.
+
+    The dense influence basis stores one ``(npix, npix)`` map per actuator,
+    which stops being possible long before flight scale (two 96 x 96 lattices
+    on a 2048-pixel pupil are ~600 GB). A lattice of identical influence
+    functions is a convolution, so the surface is evaluated instead as
+
+        surface = ifft2( G(f) * S(f) ),   S(f) = sum_a c_a exp(-2 pi i f . x_a)
+
+    with ``G`` the analytic Fourier transform of the Gaussian influence
+    function and ``S`` a matrix Fourier transform of the ``(n, n)`` command
+    lattice onto the pupil grid's FFT frequencies (two ``(npix, n)``
+    matrices). Nothing per actuator is ever stored, the map is linear in the
+    command, and it differentiates like any other pytree leaf. The lattice is
+    square with a uniform pitch and every actuator is commandable; ``coeffs``
+    is the full ``(n * n,)`` command in row-major ``(y, x)`` order. Each unit
+    coefficient is a 1 nm OPD poke at its actuator, the same contract as
+    :func:`dm_influence_basis`. A lattice wider than the array is allowed, and
+    the periodic FFT then wraps the outside rows to the opposite edge (the same
+    behavior as any FFT-convolution mirror model); whether those
+    wrapped rows land inside the illuminated pupil is the caller's geometry to
+    check, since a controller would otherwise be handed unphysical authority.
+
+    Quacks like a ``ModeBasis`` for the control seams (``coeffs``, ``n_modes``,
+    ``opd``, ``kind``); ``B`` is an EMPTY stack so that the ``PhaseScreen``
+    grid check passes while consumers that need dense modes refuse it
+    (``probe_set`` raises; ``linearize``'s analytic route fails on the shape).
+
+    Attributes:
+        coeffs: The command, ``(n_across * n_across,)`` nm OPD pokes.
+        transfer: ``(npix, npix)`` complex frequency response of one poke,
+            including the half-pixel-offset grid phase and the FFT scale.
+        fx: ``(npix, n_across)`` complex MFT kernel along x.
+        fy: ``(npix, n_across)`` complex MFT kernel along y.
+        n_across: Actuators across the lattice.
+        npix: Pupil grid size the surface is evaluated on.
+        pitch: Actuator pitch in pupil-diameter units.
+        coupling: Nearest-neighbor influence fraction.
+        centers: Actuator centers, ``(n_across * n_across, 2)`` in
+            pupil-diameter units, row-major ``(y, x)`` order.
+        kind: Always ``"opd"``.
+    """
+
+    coeffs: Array
+    transfer: Array
+    fx: Array
+    fy: Array
+    centers: Array
+    n_across: int = eqx.field(static=True)
+    npix: int = eqx.field(static=True)
+    pitch: float = eqx.field(static=True)
+    coupling: float = eqx.field(static=True)
+    kind: str = eqx.field(static=True, default="opd")
+
+    @classmethod
+    def build(cls, grid, *, n_across, pitch, coupling=0.15, center=(0.0, 0.0)):
+        """Build the lattice on a pupil grid.
+
+        Args:
+            grid: The pupil ``Grid`` (half-pixel-offset coordinates in
+                pupil-diameter units).
+            n_across: Actuators across the lattice.
+            pitch: Actuator pitch in pupil-diameter units.
+            coupling: Influence at the adjacent actuator as a fraction of the
+                poke (sets the Gaussian width, ``sigma = pitch /
+                sqrt(-ln coupling)``).
+            center: ``(x, y)`` of the lattice center in pupil-diameter units.
+
+        Returns:
+            An ``ActuatorLattice`` with zero command.
+
+        Raises:
+            ValueError: If ``coupling`` is not in (0, 1) or ``pitch`` is not
+                positive.
+        """
+        if not 0.0 < coupling < 1.0:
+            raise ValueError(f"coupling must be in (0, 1), got {coupling}")
+        if pitch <= 0.0:
+            raise ValueError(f"pitch must be positive, got {pitch}")
+        npix = grid.npix
+        dx = grid.dx
+        sigma = pitch / np.sqrt(-np.log(coupling))
+        lattice = (np.arange(n_across) - (n_across - 1) / 2.0) * pitch
+        cx = lattice + center[0]
+        cy = lattice + center[1]
+        xc, yc = np.meshgrid(cx, cy)
+        centers = np.stack([xc.ravel(), yc.ravel()], axis=1)
+
+        freq = np.fft.fftfreq(npix, d=dx)
+        # Gaussian exp(-r^2 / sigma^2) -> pi sigma^2 exp(-pi^2 sigma^2 f^2); the
+        # ramp evaluates the inverse FFT on the half-pixel-offset coordinates
+        # x_j = (j - npix/2 + 1/2) dx, and 1/dx^2 is the Riemann df^2 times the
+        # npix^2 that ifft2 divides out.
+        offset = (0.5 - npix / 2.0) * dx
+        ramp = np.exp(2j * np.pi * freq * offset)
+        gauss_1d = np.sqrt(np.pi) * sigma * np.exp(-((np.pi * sigma * freq) ** 2))
+        transfer = np.outer(gauss_1d * ramp, gauss_1d * ramp) / dx**2
+        fx = np.exp(-2j * np.pi * np.outer(freq, cx))
+        fy = np.exp(-2j * np.pi * np.outer(freq, cy))
+        return cls(
+            coeffs=jnp.zeros(n_across * n_across),
+            transfer=jnp.asarray(transfer),
+            fx=jnp.asarray(fx),
+            fy=jnp.asarray(fy),
+            centers=jnp.asarray(centers),
+            n_across=int(n_across),
+            npix=int(npix),
+            pitch=float(pitch),
+            coupling=float(coupling),
+        )
+
+    @property
+    def n_modes(self):
+        """Number of commandable actuators."""
+        return self.n_across * self.n_across
+
+    @property
+    def B(self):
+        """An EMPTY mode stack ``(0, npix, npix)``: modes are never stored."""
+        return jnp.zeros((0, self.npix, self.npix))
+
+    def opd(self):
+        """The OPD map of the current command, ``(npix, npix)`` in nm."""
+        return self.surface(self.coeffs)
+
+    def surface(self, command):
+        """The OPD map of an arbitrary command, ``(npix, npix)`` in nm."""
+        lattice = command.reshape(self.n_across, self.n_across)
+        spectrum = self.fy @ lattice.astype(self.fy.dtype) @ self.fx.T
+        return jnp.real(jnp.fft.ifft2(self.transfer * spectrum))
+
+
+class ActuatorDM(PhaseScreen):
+    """A deformable mirror on an :class:`ActuatorLattice`: flight-scale ready.
+
+    A drop-in ``PhaseScreen`` whose ``basis`` is the FFT-evaluated lattice, so
+    every driver that swaps ``stage.op.basis.coeffs`` commands it unchanged
+    and the ``jacfwd`` / matrix-free Jacobians differentiate through the
+    convolution. Use it where :class:`DeformableMirror` would materialize an
+    impossible mode stack; use the dense device where probe generation or
+    the analytic linearization need explicit modes.
+    """
+
+    basis: ActuatorLattice
+
+    def __init__(self, lattice, grid, *, wavelength_nm, plane=PlaneKind.PUPIL):
+        """Wrap a lattice as a phase stage.
+
+        Args:
+            lattice: The ``ActuatorLattice`` (its ``coeffs`` are the command).
+            grid: The pupil ``Grid`` the lattice was built on.
+            wavelength_nm: Design wavelength of the phase screen.
+            plane: The plane the mirror sits in (``INTERMEDIATE`` for an
+                out-of-pupil mirror behind a Fresnel relay).
+        """
+        super().__init__(lattice, grid, wavelength_nm=wavelength_nm, plane=plane)
+
+    def __check_init__(self):
+        """The lattice must have been built on this grid."""
+        if self.basis.npix != self.grid.npix:
+            raise ValueError(
+                f"lattice built on {self.basis.npix} pixels does not match grid "
+                f"({self.grid.npix})"
+            )
+
+    @classmethod
+    def build(
+        cls,
+        grid,
+        *,
+        n_across,
+        pitch,
+        wavelength_nm,
+        coupling=0.15,
+        center=(0.0, 0.0),
+        plane=PlaneKind.PUPIL,
+    ):
+        """Build the mirror on a pupil grid (see :meth:`ActuatorLattice.build`)."""
+        lattice = ActuatorLattice.build(
+            grid, n_across=n_across, pitch=pitch, coupling=coupling, center=center
+        )
+        return cls(lattice, grid, wavelength_nm=wavelength_nm, plane=plane)
+
+    def surface(self, command):
+        """The OPD map a command produces, ``(npix, npix)`` in nm."""
+        return self.basis.surface(command)
+
+
+__all__ = [
+    "ActuatorDM",
+    "ActuatorLattice",
+    "DeformableMirror",
+    "HardwareDM",
+    "dm_influence_basis",
+]
