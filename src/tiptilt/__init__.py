@@ -41,6 +41,7 @@ from tiptilt.dm import (
     HardwareDM,
     dm_influence_basis,
 )
+from tiptilt.hwo_sim import HwoSimSpeckleField, load_hwo_sim, segment_zernike_series
 from tiptilt.lowfs import lowfs_calibrate, run_pointing_loop
 from tiptilt.maintenance import (
     maintain_dark_hole,
@@ -110,6 +111,7 @@ __all__ = [
     "EFCController",
     "FeedForwardController",
     "HardwareDM",
+    "HwoSimSpeckleField",
     "KalmanEstimator",
     "KalmanFieldEstimator",
     "MatrixFreeEFCController",
@@ -137,6 +139,7 @@ __all__ = [
     "grouped_drift_field",
     "hardware_dm",
     "hold_against_drift",
+    "load_hwo_sim",
     "lowfs_calibrate",
     "maintain_dark_hole",
     "maintained_residual_field",
@@ -155,6 +158,7 @@ __all__ = [
     "run",
     "run_multichannel",
     "run_pointing_loop",
+    "segment_zernike_series",
     "shared_dm_command",
     "sweep",
     "von_karman_screen",

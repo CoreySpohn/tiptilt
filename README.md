@@ -35,6 +35,10 @@ the mode basis, and the residual interface.
   spectral synthesis only approximates over a few decorrelation times), plus
   the non-stationary regimes it cannot express at all -- a random walk whose
   variance grows in time, and one-sided creep with a skewed marginal.
+- **hwo_sim reader** (`hwo_sim`): `load_hwo_sim` reads an hwo_sim linear
+  E-field directory (nominal field and sensitivity matrix on the dark-zone
+  pixel list), and `HwoSimSpeckleField` evaluates it as a speckle field with a
+  sinusoid or tabulated drift.
 - **Sensing** (`sensing`): pairwise probe estimation, Zernike wavefront
   sensor calibration and reconstruction, and Kalman field estimators behind
   a common `AbstractEstimator` seam.
