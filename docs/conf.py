@@ -16,7 +16,13 @@ extensions = [
 ]
 
 autoapi_dirs = ["../src"]
-autoapi_ignore = ["**/*version.py"]
+# Include the generated version module so AutoAPI can resolve __version__.
+# AutoAPI already indexes fields; Napoleon should render their descriptions only.
+napoleon_use_ivar = True
+autodoc_typehints = "description"
+exclude_patterns = ["_build", ".build", "Thumbs.db", ".DS_Store"]
+language = "en"
+
 myst_enable_extensions = ["amsmath", "dollarmath"]
 
 html_theme = "sphinx_book_theme"

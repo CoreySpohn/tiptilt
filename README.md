@@ -59,6 +59,22 @@ the mode basis, and the residual interface.
 The mode-basis constructors it builds on (`zernike_basis`,
 `segment_ptt_basis`, `fourier_dm_basis`) live in `physicaloptix`.
 
+## Quick start
+
+Generate a deterministic two-mode creep trajectory without an optical path or
+external data. Rates are in nm/s; rows contain mode coefficients in nm at each
+sample time.
+
+```python
+import jax.numpy as jnp
+
+from tiptilt import creep_trajectory
+
+times_s = jnp.array([0.0, 10.0, 20.0])
+coefficients_nm = creep_trajectory(jnp.array([0.02, -0.005]), times_s=times_s)
+print(coefficients_nm)
+```
+
 ## Layout
 
 - `src/tiptilt/` -- the package.
