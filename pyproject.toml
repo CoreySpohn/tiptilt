@@ -20,7 +20,6 @@ classifiers = [
 dependencies = [
     "astropy",
     "equinox>=0.12.0",
-    "hwoutils",
     "jax>=0.4.1",
     "jaxlib>=0.4.1",
     "jaxtyping",
@@ -31,14 +30,22 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pre-commit"]
-test = ["pytest", "hypothesis", "pytest-cov", "pytest-xdist"]
-docs = ["myst-nb", "sphinx-autoapi", "sphinx-book-theme"]
+test = [
+    "pytest",
+    "hypothesis",
+    "pytest-cov",
+    "pytest-xdist",
+    "pytest-testmon",
+    "pytest-markdown-docs",
+    "pytest-timeout",
+    "pytest-fail-slow",
+    "hwoutils",
+]
+docs = ["sphinx", "myst-nb", "sphinx-autoapi", "sphinx-book-theme"]
 
 [tool.pytest.ini_options]
-# Loop-convergence (physics regression) tests dominate the suite; run the
-# suite parallel by default and keep a fast unit loop via -m "not slow".
-addopts = "-n auto"
 markers = [
+    "medium: tests with a 30-second default time budget",
     "slow: multi-step control-loop convergence (physics regression, seconds each)",
 ]
 
@@ -64,3 +71,24 @@ packages = ["src/tiptilt"]
 dev = [
     "pytest-xdist>=3.8.0",
 ]
+
+[tool.testbudget]
+library = "tiptilt"
+mode = "report"
+unit_s = 5
+medium_s = 30
+slow_s = 300
+
+[tool.deptry]
+known_first_party = ["tiptilt"]
+optional_dependencies_dev_groups = ["dev", "docs", "test"]
+
+[tool.deptry.per_rule_ignores]
+# JAX loads its compiled backend; keep the explicit minimum version constraint.
+DEP002 = ["jaxlib"]
+
+[tool.ty.environment]
+python-version = "3.11"
+
+[tool.ty.src]
+include = ["src/tiptilt"]
