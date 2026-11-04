@@ -1,0 +1,7 @@
+# Unreleased sibling libraries, applied as uv overrides so each is installed at a pinned main
+# commit whatever version bounds other packages declare (a breaking change waiting for its
+# release tag reports the old major version). Move a pin deliberately; drop it once PyPI covers it.
+hwoutils @ git+https://github.com/CoreySpohn/hwoutils.git@683aa5221a04775956076cc4b96b59a38a5e2bc7
+optixstuff @ git+https://github.com/CoreySpohn/optixstuff.git@3700d92b93fe4e1ddb96978312c6e26eb6cdfe81
+physicaloptix @ git+https://github.com/CoreySpohn/physicaloptix.git@4d5afa578522c84f021317437d1fc8abff5ca1fb
+yippy @ git+https://github.com/HabitableWorldsObservatory/yippy.git@beebaf05f7475845f929e8df43e4a13b571a0fa1
