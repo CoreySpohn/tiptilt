@@ -54,7 +54,7 @@ docs = [
 filterwarnings = [
     "error",
     # JAX 0.8.x casts complex cotangents to real in mixed-type dot transposes.
-    'ignore:^Casting complex values to real discards the imaginary part$:numpy.exceptions.ComplexWarning:jax\._src\.lax\.lax$',
+    'ignore:^Casting complex values to real discards the imaginary part$:numpy.exceptions.ComplexWarning:jax\._src\.lax\.lax:5518',
 ]
 markers = [
     "medium: tests with a 30-second default time budget",
