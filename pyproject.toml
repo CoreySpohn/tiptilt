@@ -33,7 +33,6 @@ dev = ["pre-commit>=3.6.0"]
 test = [
     "pytest>=7.3.2",
     "hypothesis>=6.79.1",
-    "pytest-cov>=1.0",
     # hwoutils.testbudget needs portable process-memory readings on macOS.
     "psutil>=5.9.4",
     "pytest-xdist>=2.5",
