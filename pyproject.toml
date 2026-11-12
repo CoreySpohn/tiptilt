@@ -24,8 +24,8 @@ dependencies = [
     "jaxlib>=0.8.1",
     "jaxtyping>=0.2.36",
     "numpy>=2.0",
-    "optixstuff>=1.5.0",
-    "physicaloptix>=0.2.0",
+    "optixstuff>=4.0.0",
+    "physicaloptix>=1.1.0",
 ]
 
 [project.optional-dependencies]
