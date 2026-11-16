@@ -24,13 +24,14 @@ from dataclasses import field as dataclass_field
 
 import jax.numpy as jnp
 import numpy as np
+from hwoutils.constants import d2s, nm2m
+from hwoutils.grids import Frame, PixelGrid
 from physicaloptix import (
     BeamSplitter,
     Branch,
     Field,
     Fraunhofer,
     Fresnel,
-    Grid,
     ModeBasis,
     OpticalPath,
     OpticalSystem,
@@ -364,8 +365,7 @@ def sweep(scenarios, algorithms):
 
 
 def _fourier_basis(npix, freqs, amp_nm=5.0):
-    x = np.asarray(Grid.pupil(npix).coords)
-    xg, yg = np.meshgrid(x, x)
+    xg, yg = map(np.asarray, PixelGrid.pupil(npix).coordinates())
     modes = []
     for kx, ky in freqs:
         arg = 2 * np.pi * (kx * xg + ky * yg)
@@ -376,9 +376,8 @@ def _fourier_basis(npix, freqs, amp_nm=5.0):
 
 
 def _aperture(npix):
-    grid = Grid.pupil(npix)
-    x = np.asarray(grid.coords)
-    xg, yg = np.meshgrid(x, x)
+    grid = PixelGrid.pupil(npix)
+    xg, yg = map(np.asarray, grid.coordinates())
     return grid, xg, yg, (xg**2 + yg**2 <= 0.25).astype(float)
 
 
@@ -397,7 +396,7 @@ def dig_from_cold(npix=16, n_steps=15, stroke_cap_nm=None, actuator_dm=False):
         A ``Scenario`` (regime ``dig``).
     """
     grid, xg, yg, aperture = _aperture(npix)
-    focal = Grid.focal(32, 0.5)
+    focal = PixelGrid.focal(32, 0.5, Frame(WL, DIAM_M, "circumscribed"))
     if actuator_dm:
         from tiptilt.dm import DeformableMirror
 
@@ -424,8 +423,7 @@ def dig_from_cold(npix=16, n_steps=15, stroke_cap_nm=None, actuator_dm=False):
     model_field = Field(
         data=jnp.asarray(aperture).astype(complex), grid=grid, plane=PlaneKind.PUPIL
     )
-    fx = np.asarray(focal.coords)
-    fxg, fyg = np.meshgrid(fx, fx)
+    fxg, fyg = map(np.asarray, focal.coordinates())
     mask = jnp.asarray((np.abs(fxg - 3.0) < 0.6) & (np.abs(fyg - 1.0) < 0.8))
     # Stroke minimization aims at a RELATIVE target: 5 percent of the actual
     # starting contrast (an absolute default can sit above the initial level,
@@ -462,14 +460,14 @@ def one_dm_vs_two_dm(npix=16, n_steps=25):
         Dict with ``one_dm`` and ``two_dm`` ``Scenario`` objects.
     """
     grid, xg, _yg, aperture = _aperture(npix)
-    focal = Grid.focal(32, 0.5)
+    focal = PixelGrid.focal(32, 0.5, Frame(WL, DIAM_M, "circumscribed"))
     ripple = 1.0 + 0.15 * np.cos(2 * np.pi * 3 * xg)
     input_field = Field(
         data=jnp.asarray(aperture * ripple).astype(complex),
         grid=grid,
         plane=PlaneKind.PUPIL,
     )
-    z = 0.0556 * DIAM_M**2 / (WL * 1e-9)
+    z = 0.0556 * DIAM_M**2 / (WL * nm2m)
 
     def fresnel(dist, pin, pout):
         return Fresnel(
@@ -498,8 +496,7 @@ def one_dm_vs_two_dm(npix=16, n_steps=25):
             Stage("science", Fraunhofer(grid_in=grid, grid_out=focal)),
         )
     )
-    fx = np.asarray(focal.coords)
-    fxg, fyg = np.meshgrid(fx, fx)
+    fxg, fyg = map(np.asarray, focal.coordinates())
     both = (np.abs(fxg - 3.0) < 0.6) | (np.abs(fxg + 3.0) < 0.6)
     mask = jnp.asarray(both & (np.abs(fyg) < 0.6))
     common = dict(
@@ -532,7 +529,7 @@ def hold_against_drift(npix=16, n_steps=12):
     from tiptilt.control import close_dark_hole
 
     grid, _xg, _yg, aperture = _aperture(npix)
-    focal = Grid.focal(32, 0.5)
+    focal = PixelGrid.focal(32, 0.5, Frame(WL, DIAM_M, "circumscribed"))
     drift_basis = _fourier_basis(npix, [(3, 1), (3, 0)], amp_nm=4.0)
     dm = _fourier_basis(npix, [(3, 1), (3, 0), (2, 1), (4, 1)], amp_nm=4.0)
     path = OpticalPath(
@@ -545,8 +542,7 @@ def hold_against_drift(npix=16, n_steps=12):
     input_field = Field(
         data=jnp.asarray(aperture).astype(complex), grid=grid, plane=PlaneKind.PUPIL
     )
-    fx = np.asarray(focal.coords)
-    fxg, fyg = np.meshgrid(fx, fx)
+    fxg, fyg = map(np.asarray, focal.coordinates())
     mask = jnp.asarray(
         ((np.abs(fxg - 3.0) < 0.6) & (np.abs(fyg - 1.0) < 0.6))
         | ((np.abs(fxg - 3.0) < 0.6) & (np.abs(fyg) < 0.6))
@@ -558,8 +554,8 @@ def hold_against_drift(npix=16, n_steps=12):
     table = jnp.asarray(np.arange(1, n_steps + 1)[:, None] * 0.3 * directions[None, :])
     dt_s = 10.0
 
-    def drift(time_s):
-        index = jnp.clip(jnp.asarray(time_s / dt_s, dtype=int), 0, n_steps - 1)
+    def drift(time_d):
+        index = jnp.clip(jnp.asarray(time_d * d2s / dt_s, dtype=int), 0, n_steps - 1)
         return table[index]
 
     return Scenario(
@@ -582,7 +578,7 @@ def hold_against_drift(npix=16, n_steps=12):
 
 def _forked_system(npix=16, sci_ncpa_nm=0.0):
     grid, _xg, _yg, aperture = _aperture(npix)
-    focal = Grid.focal(32, 0.5)
+    focal = PixelGrid.focal(32, 0.5, Frame(WL, DIAM_M, "circumscribed"))
     shared = _fourier_basis(npix, [(3, 1), (3, 0)], amp_nm=4.0)
     corrector = _fourier_basis(npix, [(3, 1), (3, 0)], amp_nm=4.0)
     private = _fourier_basis(npix, [(2, 1)], amp_nm=4.0)
@@ -618,8 +614,7 @@ def _forked_system(npix=16, sci_ncpa_nm=0.0):
     input_field = Field(
         data=jnp.asarray(aperture).astype(complex), grid=grid, plane=PlaneKind.PUPIL
     )
-    fx = np.asarray(focal.coords)
-    fxg, fyg = np.meshgrid(fx, fx)
+    fxg, fyg = map(np.asarray, focal.coordinates())
     mask = jnp.asarray((np.abs(fxg - 3.0) < 0.6) & (np.abs(np.abs(fyg) - 0.5) < 0.7))
     return system, input_field, {"sci": mask, "wfs": mask}
 
@@ -736,7 +731,7 @@ def dual_science_common_mode(npix=16, n_steps=6):
 
 def _pointing_system(npix=16, sensor_defocus_nm=25.0):
     grid, _xg, _yg, aperture = _aperture(npix)
-    focal = Grid.focal(32, 0.5)
+    focal = PixelGrid.focal(32, 0.5, Frame(WL, DIAM_M, "circumscribed"))
     zern = zernike_basis(grid, 4)  # Noll 1..4: piston, tip, tilt, focus
     low_order = ModeBasis(B=zern.B[1:], coeffs=jnp.zeros(3))
     corrector = ModeBasis(B=zern.B[1:], coeffs=jnp.zeros(3))
@@ -768,8 +763,7 @@ def _pointing_system(npix=16, sensor_defocus_nm=25.0):
     input_field = Field(
         data=jnp.asarray(aperture).astype(complex), grid=grid, plane=PlaneKind.PUPIL
     )
-    fx = np.asarray(focal.coords)
-    fxg, fyg = np.meshgrid(fx, fx)
+    fxg, fyg = map(np.asarray, focal.coordinates())
     radius = np.hypot(fxg, fyg)
     mask = jnp.asarray((radius > 1.5) & (radius < 4.0))
     return system, input_field, mask
@@ -837,7 +831,7 @@ def hardware_dm(npix=16, n_steps=12, dac_step_nm=None, n_dead=0, stuck_nm=None):
     from tiptilt.dm import DeformableMirror
 
     grid, xg, yg, aperture = _aperture(npix)
-    focal = Grid.focal(32, 0.5)
+    focal = PixelGrid.focal(32, 0.5, Frame(WL, DIAM_M, "circumscribed"))
     n_actuators = max(12, npix // 2)
     n_active = DeformableMirror.build(
         grid, n_actuators=n_actuators, wavelength_nm=WL
@@ -876,8 +870,7 @@ def hardware_dm(npix=16, n_steps=12, dac_step_nm=None, n_dead=0, stuck_nm=None):
     model_field = Field(
         data=jnp.asarray(aperture).astype(complex), grid=grid, plane=PlaneKind.PUPIL
     )
-    fx = np.asarray(focal.coords)
-    fxg, fyg = np.meshgrid(fx, fx)
+    fxg, fyg = map(np.asarray, focal.coordinates())
     mask = jnp.asarray((np.abs(fxg - 3.0) < 0.6) & (np.abs(fyg - 1.0) < 0.8))
     out, _ = path.propagate(input_field)
     initial = float(jnp.mean(jnp.abs(out.data[mask]) ** 2))

@@ -4,11 +4,13 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
+from hwoutils.constants import nm2m
+from hwoutils.grids import Frame, PixelGrid
+from hwoutils.spectral import Band
 from physicaloptix import (
     Field,
     Fraunhofer,
     Fresnel,
-    Grid,
     ModeBasis,
     OpticalPath,
     PhaseScreen,
@@ -36,8 +38,7 @@ DIAM_M = 0.02
 
 
 def _fourier_dm(npix, amp_nm=5.0, freqs=None):
-    x = np.asarray(Grid.pupil(npix).coords)
-    x_grid, y_grid = np.meshgrid(x, x)
+    x_grid, y_grid = map(np.asarray, PixelGrid.pupil(npix).coordinates())
     modes = []
     for kx, ky in freqs or _KS:
         arg = 2 * np.pi * (kx * x_grid + ky * y_grid)
@@ -48,10 +49,9 @@ def _fourier_dm(npix, amp_nm=5.0, freqs=None):
 
 
 def _setup(npix=16):
-    pupil = Grid.pupil(npix)
-    focal = Grid.focal(32, 0.5)
-    x = np.asarray(pupil.coords)
-    x_grid, y_grid = np.meshgrid(x, x)
+    pupil = PixelGrid.pupil(npix)
+    focal = PixelGrid.focal(32, 0.5, Frame(WL, DIAM_M, "circumscribed"))
+    x_grid, y_grid = map(np.asarray, pupil.coordinates())
     aperture = (x_grid**2 + y_grid**2 <= 0.25).astype(float)
     aberration = 3.0 * np.cos(2 * np.pi * (3 * x_grid + 1 * y_grid))  # nm, freq (3,1)
     e_in = aperture * np.exp(1j * 2 * np.pi * aberration / WL)
@@ -62,8 +62,7 @@ def _setup(npix=16):
             Stage("science", Fraunhofer(grid_in=pupil, grid_out=focal)),
         )
     )
-    fx = np.asarray(focal.coords)
-    fx_grid, fy_grid = np.meshgrid(fx, fx)
+    fx_grid, fy_grid = map(np.asarray, focal.coordinates())
     # A small one-sided dark zone around the aberration's speckle at (3, 1) lambda/D.
     mask = (np.abs(fx_grid - 3.0) < 0.4) & (np.abs(fy_grid - 1.0) < 0.4)
     return path, field, jnp.asarray(mask)
@@ -76,15 +75,14 @@ def _relay_setup(npix=16, alpha=0.0556):
     ``alpha`` is set near the Talbot peak for the (3, 0) speckle (pi alpha 3^2
     approximately pi/2), so the out-of-pupil DM has strong amplitude authority.
     """
-    pupil = Grid.pupil(npix)
-    focal = Grid.focal(32, 0.5)
-    x = np.asarray(pupil.coords)
-    x_grid, y_grid = np.meshgrid(x, x)
+    pupil = PixelGrid.pupil(npix)
+    focal = PixelGrid.focal(32, 0.5, Frame(WL, DIAM_M, "circumscribed"))
+    x_grid, y_grid = map(np.asarray, pupil.coordinates())
     aperture = (x_grid**2 + y_grid**2 <= 0.25).astype(float)
     amplitude_ripple = 1.0 + 0.15 * np.cos(2 * np.pi * 3 * x_grid)  # (3, 0) speckle
     e_in = (aperture * amplitude_ripple).astype(complex)
     field = Field(data=jnp.asarray(e_in), grid=pupil, plane=PlaneKind.PUPIL)
-    z = alpha * DIAM_M**2 / (WL * 1e-9)
+    z = alpha * DIAM_M**2 / (WL * nm2m)
 
     def fresnel(distance_m, plane_in, plane_out):
         return Fresnel(
@@ -112,8 +110,7 @@ def _relay_setup(npix=16, alpha=0.0556):
             Stage("science", Fraunhofer(grid_in=pupil, grid_out=focal)),
         )
     )
-    fx = np.asarray(focal.coords)
-    fx_grid, fy_grid = np.meshgrid(fx, fx)
+    fx_grid, fy_grid = map(np.asarray, focal.coordinates())
     # A TWO-SIDED zone: a pupil phase DM cannot null a real symmetric speckle at
     # both +3 and -3 at once (its modes are imaginary-symmetric or real-anti-
     # symmetric); the out-of-pupil DM supplies the missing real-symmetric quadrature.
@@ -128,9 +125,8 @@ def _relay_estimated_setup(npix=16, alpha=0.0556):
     the amplitude ripple, so the probe response is modelled without the unknown
     aberration exactly as real hardware must."""
     path, field, mask = _relay_setup(npix=npix, alpha=alpha)
-    pupil = Grid.pupil(npix)
-    x = np.asarray(pupil.coords)
-    x_grid, y_grid = np.meshgrid(x, x)
+    pupil = PixelGrid.pupil(npix)
+    x_grid, y_grid = map(np.asarray, pupil.coordinates())
     aperture = (x_grid**2 + y_grid**2 <= 0.25).astype(complex)
     model_field = Field(data=jnp.asarray(aperture), grid=pupil, plane=PlaneKind.PUPIL)
     dm_basis = _fourier_dm(npix, freqs=_RELAY_KS)
@@ -184,7 +180,9 @@ class TestTwoDeformableMirrors:
         chromatic broadband null floors above the monochromatic case (the
         contrast-vs-bandwidth tradeoff, not a DOF or sensing limit)."""
         path, mono, mask = _relay_setup()
-        field = broadcast_to_spectrum(mono, Spectrum.tophat(WL, 0.15, 3))
+        field = broadcast_to_spectrum(
+            mono, Spectrum.from_band(Band(WL * 0.925, WL * 1.075), 3)
+        )
         _, hist_two = close_dark_hole(
             path, field, (0, 2), mask, n_steps=30, gain=0.5, regularization=1e-7
         )
@@ -334,10 +332,9 @@ class TestCloseDarkHole:
 def _estimated_setup(npix=32, nfoc=64, pscale=0.25):
     """A pupil -> Fourier-DM -> focal path with a phase aberration and a
     one-sided (single-DM-nullable) dark zone, plus its unaberrated model."""
-    pupil = Grid.pupil(npix)
-    focal = Grid.focal(nfoc, pscale)
-    coords = np.asarray(pupil.coords)
-    xg, yg = np.meshgrid(coords, coords)
+    pupil = PixelGrid.pupil(npix)
+    focal = PixelGrid.focal(nfoc, pscale, Frame(WL, DIAM_M, "circumscribed"))
+    xg, yg = map(np.asarray, pupil.coordinates())
     aperture = (xg**2 + yg**2 <= 0.25).astype(complex)
     dm = fourier_dm_basis(pupil, n_actuators=16, k_min=2.0, k_max=7.0)
     path = OpticalPath(
@@ -353,8 +350,7 @@ def _estimated_setup(npix=32, nfoc=64, pscale=0.25):
         plane=PlaneKind.PUPIL,
     )
     model_field = Field(data=jnp.asarray(aperture), grid=pupil, plane=PlaneKind.PUPIL)
-    fx = np.asarray(focal.coords)
-    fxg, fyg = np.meshgrid(fx, fx)
+    fxg, fyg = map(np.asarray, focal.coordinates())
     r = np.hypot(fxg, fyg)
     mask = jnp.asarray((r >= 2.0) & (r <= 7.0) & (fxg > 1.0))  # one-sided D-shape
     return path, dm, input_field, model_field, mask
@@ -509,7 +505,7 @@ class TestEstimatedTwoDeformableMirrors:
         floor set by the CHROMATIC tax (monochromatically the same mirrors dig far
         deeper; the oracle hits the same floor), all from probe images."""
         path, dm_basis, mono, model_mono, mask = _relay_estimated_setup()
-        spectrum = Spectrum.tophat(WL, 0.15, 3)
+        spectrum = Spectrum.from_band(Band(WL * 0.925, WL * 1.075), 3)
         field = broadcast_to_spectrum(mono, spectrum)
         model = broadcast_to_spectrum(model_mono, spectrum)
         probes = probe_set(dm_basis, amplitude_nm=2.0, n_probes=4)
@@ -549,7 +545,7 @@ class TestEstimatedTwoDeformableMirrors:
         one probe pair per step, per sub-band (the per-(wavelength, pixel) state
         accumulates rank over time), digging the band contrast from probe images."""
         path, dm_basis, mono, model_mono, mask = _relay_estimated_setup()
-        spectrum = Spectrum.tophat(WL, 0.15, 3)
+        spectrum = Spectrum.from_band(Band(WL * 0.925, WL * 1.075), 3)
         field = broadcast_to_spectrum(mono, spectrum)
         model = broadcast_to_spectrum(model_mono, spectrum)
         probes = probe_set(dm_basis, amplitude_nm=2.0, n_probes=3)
@@ -575,10 +571,9 @@ def _weighted_setup(npix=16, nfoc=32, pscale=0.5):
     The default ``_setup`` zone is a couple of pixels around one speckle,
     which cannot distinguish "dig here" from "dig there".
     """
-    pupil = Grid.pupil(npix)
-    focal = Grid.focal(nfoc, pscale)
-    x = np.asarray(pupil.coords)
-    x_grid, y_grid = np.meshgrid(x, x)
+    pupil = PixelGrid.pupil(npix)
+    focal = PixelGrid.focal(nfoc, pscale, Frame(WL, DIAM_M, "circumscribed"))
+    x_grid, y_grid = map(np.asarray, pupil.coordinates())
     aperture = (x_grid**2 + y_grid**2 <= 0.25).astype(float)
     aberration = sum(
         3.0 * np.cos(2 * np.pi * (kx * x_grid + ky * y_grid)) for kx, ky in _KS
@@ -591,8 +586,7 @@ def _weighted_setup(npix=16, nfoc=32, pscale=0.5):
             Stage("science", Fraunhofer(grid_in=pupil, grid_out=focal)),
         )
     )
-    fx = np.asarray(focal.coords)
-    fx_grid, fy_grid = np.meshgrid(fx, fx)
+    fx_grid, fy_grid = map(np.asarray, focal.coordinates())
     radius = np.hypot(fx_grid, fy_grid)
     mask = (radius > 1.5) & (radius < 5.0) & (fx_grid > 0.0)
     return path, field, jnp.asarray(mask), (fx_grid, fy_grid)
@@ -709,7 +703,9 @@ class TestPixelWeights:
         n_dz = int(jnp.sum(mask))
         rng = np.random.default_rng(0)
         pixel = jnp.asarray(rng.uniform(0.1, 2.0, n_dz))
-        band = broadcast_to_spectrum(field, Spectrum.tophat(WL, 0.1, 3))
+        band = broadcast_to_spectrum(
+            field, Spectrum.from_band(Band(WL * 0.95, WL * 1.05), 3)
+        )
 
         model = DarkZoneModel.build(
             path, 0, mask, jacobian_field=band, pixel_weights=pixel

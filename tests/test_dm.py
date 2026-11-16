@@ -3,10 +3,10 @@
 import jax.numpy as jnp
 import numpy as np
 import pytest
+from hwoutils.grids import Frame, PixelGrid
 from physicaloptix import (
     Field,
     Fraunhofer,
-    Grid,
     OpticalPath,
     PhaseScreen,
     PlaneKind,
@@ -25,7 +25,7 @@ WL = 500.0
 
 
 def _nearest_pixel_value(mode, grid, center):
-    coords = np.asarray(grid.coords)
+    coords = np.asarray(grid.coordinates().x[0])
     ix = int(np.argmin(np.abs(coords - center[0])))
     iy = int(np.argmin(np.abs(coords - center[1])))
     return float(np.asarray(mode)[iy, ix])
@@ -33,7 +33,7 @@ def _nearest_pixel_value(mode, grid, center):
 
 class TestInfluenceBasis:
     def test_shapes_peak_and_unit_contract(self):
-        grid = Grid.pupil(32)
+        grid = PixelGrid.pupil(32)
         basis, centers = dm_influence_basis(grid, n_actuators=8, coupling=0.15)
         n_kept = basis.B.shape[0]
         assert centers.shape == (n_kept, 2)
@@ -48,12 +48,12 @@ class TestInfluenceBasis:
         sampled mode against the analytic form at the pixel nearest a
         neighboring actuator (the pixel sits ~half a pixel off the exact
         center, so compare at the PROBED position, not at r == pitch)."""
-        grid = Grid.pupil(64)
+        grid = PixelGrid.pupil(64)
         coupling = 0.12
         basis, centers = dm_influence_basis(grid, n_actuators=8, coupling=coupling)
         centers = np.asarray(centers)
         pitch = 1.0 / 8
-        coords = np.asarray(grid.coords)
+        coords = np.asarray(grid.coordinates().x[0])
         k = 0
         neighbor = centers[k] + np.asarray([pitch, 0.0])
         ix = int(np.argmin(np.abs(coords - neighbor[0])))
@@ -69,7 +69,7 @@ class TestInfluenceBasis:
     def test_actuators_beyond_the_margin_are_dropped(self):
         """With a half-pitch margin the 8x8 corners (r = 0.619) are dropped
         (keep radius 0.5625); a full-pitch margin keeps them (0.625)."""
-        grid = Grid.pupil(32)
+        grid = PixelGrid.pupil(32)
         n = 8
         basis, centers = dm_influence_basis(grid, n_actuators=n, margin_actuators=0.5)
         assert basis.B.shape[0] < n * n  # the square corners are gone
@@ -80,13 +80,12 @@ class TestInfluenceBasis:
 
     def test_flat_poke_is_flat_in_the_interior(self):
         """Equal pokes on all actuators give a uniform interior surface."""
-        grid = Grid.pupil(64)
+        grid = PixelGrid.pupil(64)
         basis, _ = dm_influence_basis(grid, n_actuators=10, coupling=0.15)
         surface = np.asarray(
             jnp.tensordot(5.0 * jnp.ones(basis.B.shape[0]), basis.B, axes=1)
         )
-        x = np.asarray(grid.coords)
-        xg, yg = np.meshgrid(x, x)
+        xg, yg = map(np.asarray, grid.coordinates())
         interior = np.hypot(xg, yg) < 0.3
         values = surface[interior]
         assert np.std(values) / np.mean(values) < 0.05
@@ -94,14 +93,14 @@ class TestInfluenceBasis:
 
 class TestDeformableMirror:
     def test_builds_a_phase_screen_element(self):
-        grid = Grid.pupil(32)
+        grid = PixelGrid.pupil(32)
         dm = DeformableMirror.build(grid, n_actuators=8, wavelength_nm=WL)
         assert isinstance(dm.screen, PhaseScreen)
         assert dm.n_active == dm.screen.basis.n_modes
         assert dm.centers.shape == (dm.n_active, 2)
 
     def test_clip_enforces_the_per_actuator_stroke_limit(self):
-        grid = Grid.pupil(32)
+        grid = PixelGrid.pupil(32)
         dm = DeformableMirror.build(
             grid, n_actuators=8, wavelength_nm=WL, stroke_limit_nm=3.0
         )
@@ -113,7 +112,7 @@ class TestDeformableMirror:
         np.testing.assert_array_equal(np.asarray(free.clip(wild)), np.asarray(wild))
 
     def test_surface_matches_the_screen_opd(self):
-        grid = Grid.pupil(32)
+        grid = PixelGrid.pupil(32)
         dm = DeformableMirror.build(grid, n_actuators=8, wavelength_nm=WL)
         command = 0.3 * jnp.arange(dm.n_active, dtype=float)
         np.testing.assert_allclose(
@@ -127,11 +126,10 @@ class TestDeformableMirror:
         """The device drops into close_dark_hole unchanged: its screen is a
         PhaseScreen, its coefficients are per-actuator strokes."""
         npix = 32
-        grid = Grid.pupil(npix)
-        focal = Grid.focal(48, 0.4)
+        grid = PixelGrid.pupil(npix)
+        focal = PixelGrid.focal(48, 0.4, Frame(WL, 1.0, "circumscribed"))
         dm = DeformableMirror.build(grid, n_actuators=12, wavelength_nm=WL)
-        x = np.asarray(grid.coords)
-        xg, yg = np.meshgrid(x, x)
+        xg, yg = map(np.asarray, grid.coordinates())
         aperture = (xg**2 + yg**2 <= 0.25).astype(float)
         opd = 3.0 * np.cos(2 * np.pi * (3 * xg + yg))
         field = Field(
@@ -145,8 +143,7 @@ class TestDeformableMirror:
                 Stage("science", Fraunhofer(grid_in=grid, grid_out=focal)),
             )
         )
-        fx = np.asarray(focal.coords)
-        fxg, fyg = np.meshgrid(fx, fx)
+        fxg, fyg = map(np.asarray, focal.coordinates())
         mask = jnp.asarray((np.abs(fxg - 3.0) < 0.8) & (np.abs(fyg - 1.0) < 0.8))
         command, history = close_dark_hole(
             path, field, 0, mask, n_steps=12, gain=0.6, regularization=1e-6
@@ -163,15 +160,14 @@ class TestActuatorLattice:
         """The FFT-evaluated surface IS the sum of Gaussian influence
         functions: compare against the explicit per-actuator sum for a
         lattice well inside the array (no periodic wrap)."""
-        grid = Grid.pupil(64)
+        grid = PixelGrid.pupil(64)
         n, pitch, coupling = 6, 0.08, 0.15
         lattice = ActuatorLattice.build(
             grid, n_across=n, pitch=pitch, coupling=coupling, center=(0.01, -0.02)
         )
         command = jnp.asarray(np.random.default_rng(0).normal(size=n * n))
         surface = np.asarray(lattice.surface(command))
-        x = np.asarray(grid.coords)
-        xg, yg = np.meshgrid(x, x)
+        xg, yg = map(np.asarray, grid.coordinates())
         centers = np.asarray(lattice.centers)
         explicit = sum(
             float(command[a])
@@ -185,13 +181,13 @@ class TestActuatorLattice:
     def test_axis_order_is_row_major_y_x(self):
         """Poking the (row 0, column n-1) actuator moves the surface peak to
         the most negative y and most positive x."""
-        grid = Grid.pupil(64)
+        grid = PixelGrid.pupil(64)
         n = 4
         lattice = ActuatorLattice.build(grid, n_across=n, pitch=0.1)
         command = jnp.zeros(n * n).at[n - 1].set(1.0)
         surface = np.asarray(lattice.surface(command))
         iy, ix = np.unravel_index(np.argmax(surface), surface.shape)
-        coords = np.asarray(grid.coords)
+        coords = np.asarray(grid.coordinates().x[0])
         assert coords[ix] > 0.1 and coords[iy] < -0.1
         # A 1 nm poke; in this geometry the peak sample sits ~0.1 px off the
         # actuator center (a half-pixel miss would read 0.977).
@@ -202,13 +198,12 @@ class TestActuatorLattice:
         PhaseScreen commanded through ``basis.coeffs``) and digs a hole with
         the same fitting-error floor the dense device shows."""
         npix = 32
-        grid = Grid.pupil(npix)
-        focal = Grid.focal(48, 0.4)
+        grid = PixelGrid.pupil(npix)
+        focal = PixelGrid.focal(48, 0.4, Frame(WL, 1.0, "circumscribed"))
         n = 12
         dm = ActuatorDM.build(grid, n_across=n, pitch=1.0 / n, wavelength_nm=WL)
         assert isinstance(dm, PhaseScreen)
-        x = np.asarray(grid.coords)
-        xg, yg = np.meshgrid(x, x)
+        xg, yg = map(np.asarray, grid.coordinates())
         aperture = (xg**2 + yg**2 <= 0.25).astype(float)
         opd = 3.0 * np.cos(2 * np.pi * (3 * xg + yg))
         field = Field(
@@ -222,8 +217,7 @@ class TestActuatorLattice:
                 Stage("science", Fraunhofer(grid_in=grid, grid_out=focal)),
             )
         )
-        fx = np.asarray(focal.coords)
-        fxg, fyg = np.meshgrid(fx, fx)
+        fxg, fyg = map(np.asarray, focal.coordinates())
         mask = jnp.asarray((np.abs(fxg - 3.0) < 0.8) & (np.abs(fyg - 1.0) < 0.8))
         command, history = close_dark_hole(
             path, field, 0, mask, n_steps=12, gain=0.6, regularization=1e-6
@@ -233,22 +227,23 @@ class TestActuatorLattice:
         assert np.asarray(dm.surface(command)).shape == (npix, npix)
 
     def test_rejects_a_mismatched_grid_and_bad_parameters(self):
-        lattice = ActuatorLattice.build(Grid.pupil(16), n_across=4, pitch=0.2)
+        lattice = ActuatorLattice.build(PixelGrid.pupil(16), n_across=4, pitch=0.2)
         with pytest.raises(ValueError, match="does not match grid"):
-            ActuatorDM(lattice, Grid.pupil(32), wavelength_nm=WL)
+            ActuatorDM(lattice, PixelGrid.pupil(32), wavelength_nm=WL)
         with pytest.raises(ValueError, match="coupling"):
-            ActuatorLattice.build(Grid.pupil(16), n_across=4, pitch=0.2, coupling=1.5)
+            ActuatorLattice.build(
+                PixelGrid.pupil(16), n_across=4, pitch=0.2, coupling=1.5
+            )
         with pytest.raises(ValueError, match="pitch"):
-            ActuatorLattice.build(Grid.pupil(16), n_across=4, pitch=0.0)
+            ActuatorLattice.build(PixelGrid.pupil(16), n_across=4, pitch=0.0)
 
 
 def _pupil_setup(npix=24, n_actuators=8, **hardware):
-    grid = Grid.pupil(npix)
+    grid = PixelGrid.pupil(npix)
     device = DeformableMirror.build(
         grid, n_actuators=n_actuators, wavelength_nm=WL, **hardware
     )
-    x = np.asarray(grid.coords)
-    xg, yg = np.meshgrid(x, x)
+    xg, yg = map(np.asarray, grid.coordinates())
     aperture = (xg**2 + yg**2 <= 0.25).astype(complex)
     field = Field(data=jnp.asarray(aperture), grid=grid, plane=PlaneKind.PUPIL)
     return grid, device, field
@@ -289,9 +284,8 @@ class TestHardwareDM:
 
         grid, device, field = _pupil_setup(dac_step_nm=2.0)
         _g2, ideal_dev, _f2 = _pupil_setup()
-        focal = Grid.focal(32, 0.5)
-        fx = np.asarray(focal.coords)
-        fxg, fyg = np.meshgrid(fx, fx)
+        focal = PixelGrid.focal(32, 0.5, Frame(WL, 1.0, "circumscribed"))
+        fxg, fyg = map(np.asarray, focal.coordinates())
         mask = jnp.asarray((np.abs(fxg - 3.0) < 0.8) & (np.abs(fyg) < 0.8))
 
         def model_for(screen):
@@ -311,7 +305,7 @@ class TestHardwareDM:
         from tiptilt.control import DarkZoneModel
 
         n_probe = DeformableMirror.build(
-            Grid.pupil(24), n_actuators=8, wavelength_nm=WL
+            PixelGrid.pupil(24), n_actuators=8, wavelength_nm=WL
         ).n_active
         gains = jnp.ones(n_probe).at[3].set(0.0)
         grid, device, field = _pupil_setup(actuator_gains=gains)
@@ -319,9 +313,8 @@ class TestHardwareDM:
         flat = eqx_set(device.screen, jnp.zeros(n_probe))
         assert jnp.allclose(poke_dead(field).data, flat(field).data)
 
-        focal = Grid.focal(32, 0.5)
-        fx = np.asarray(focal.coords)
-        fxg, fyg = np.meshgrid(fx, fx)
+        focal = PixelGrid.focal(32, 0.5, Frame(WL, 1.0, "circumscribed"))
+        fxg, fyg = map(np.asarray, focal.coordinates())
         mask = jnp.asarray((np.abs(fxg - 3.0) < 0.8) & (np.abs(fyg) < 0.8))
         path = OpticalPath(
             stages=(
@@ -336,7 +329,7 @@ class TestHardwareDM:
 
     def test_stuck_actuator_offset_applies_without_command(self):
         n = DeformableMirror.build(
-            Grid.pupil(24), n_actuators=8, wavelength_nm=WL
+            PixelGrid.pupil(24), n_actuators=8, wavelength_nm=WL
         ).n_active
         offsets = jnp.zeros(n).at[5].set(30.0)
         grid, device, field = _pupil_setup(

@@ -38,7 +38,7 @@ def dm_influence_basis(grid, *, n_actuators, coupling=0.15, margin_actuators=1.0
     1 nm OPD poke per unit coefficient.
 
     Args:
-        grid: The pupil ``Grid`` the modes are sampled on.
+        grid: The pupil ``PixelGrid`` the modes are sampled on.
         n_actuators: Actuators across the pupil diameter.
         coupling: Influence at the adjacent actuator as a fraction of the
             poke (sets the Gaussian width).
@@ -64,8 +64,7 @@ def dm_influence_basis(grid, *, n_actuators, coupling=0.15, margin_actuators=1.0
     if centers.shape[0] == 0:
         raise ValueError("no actuator centers survive the aperture margin")
 
-    coords = np.asarray(grid.coords)
-    xg, yg = np.meshgrid(coords, coords)
+    xg, yg = map(np.asarray, grid.coordinates())
     # f(r) = coupling^((r/pitch)^2): Gaussian with f(0)=1, f(pitch)=coupling.
     log_c = np.log(coupling)
     r2 = (xg[None, :, :] - centers[:, 0, None, None]) ** 2 + (
@@ -144,7 +143,7 @@ class HardwareDM(PhaseScreen):
 
         Args:
             basis: The influence-function ``ModeBasis`` (coeffs = command).
-            grid: The pupil ``Grid``.
+            grid: The pupil ``PixelGrid``.
             wavelength_nm: Design wavelength of the phase screen.
             plane: The plane the mirror sits in.
             actuator_gains: Optional per-actuator response gains.
@@ -235,7 +234,7 @@ class DeformableMirror(eqx.Module):
         """Build the device on a pupil grid.
 
         Args:
-            grid: The pupil ``Grid``.
+            grid: The pupil ``PixelGrid``.
             n_actuators: Actuators across the pupil diameter.
             wavelength_nm: Design wavelength of the phase screen.
             coupling: Nearest-neighbor influence fraction.
@@ -373,7 +372,7 @@ class ActuatorLattice(eqx.Module):
         """Build the lattice on a pupil grid.
 
         Args:
-            grid: The pupil ``Grid`` (half-pixel-offset coordinates in
+            grid: The pupil ``PixelGrid`` (half-pixel-offset coordinates in
                 pupil-diameter units).
             n_across: Actuators across the lattice.
             pitch: Actuator pitch in pupil-diameter units.
@@ -393,8 +392,8 @@ class ActuatorLattice(eqx.Module):
             raise ValueError(f"coupling must be in (0, 1), got {coupling}")
         if pitch <= 0.0:
             raise ValueError(f"pitch must be positive, got {pitch}")
-        npix = grid.npix
-        dx = grid.dx
+        npix = grid.shape[0]
+        dx = grid.step
         sigma = pitch / np.sqrt(-np.log(coupling))
         lattice = (np.arange(n_across) - (n_across - 1) / 2.0) * pitch
         cx = lattice + center[0]
@@ -464,7 +463,7 @@ class ActuatorDM(PhaseScreen):
 
         Args:
             lattice: The ``ActuatorLattice`` (its ``coeffs`` are the command).
-            grid: The pupil ``Grid`` the lattice was built on.
+            grid: The pupil ``PixelGrid`` the lattice was built on.
             wavelength_nm: Design wavelength of the phase screen.
             plane: The plane the mirror sits in (``INTERMEDIATE`` for an
                 out-of-pupil mirror behind a Fresnel relay).
@@ -473,10 +472,10 @@ class ActuatorDM(PhaseScreen):
 
     def __check_init__(self):
         """The lattice must have been built on this grid."""
-        if self.basis.npix != self.grid.npix:
+        if self.basis.npix != self.grid.shape[0]:
             raise ValueError(
                 f"lattice built on {self.basis.npix} pixels does not match grid "
-                f"({self.grid.npix})"
+                f"({self.grid.shape[0]})"
             )
 
     @classmethod

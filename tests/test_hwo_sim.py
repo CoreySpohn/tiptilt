@@ -5,6 +5,8 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 from astropy.io import fits
+from hwoutils.constants import s2d
+from hwoutils.grids import Frame
 from optixstuff.speckle import AbstractSpeckleField
 
 from tiptilt.hwo_sim import HwoSimSpeckleField, load_hwo_sim, segment_zernike_series
@@ -44,7 +46,7 @@ def _field(delivery, **drift):
         delivery["G"],
         delivery["dark_zone"],
         wavelengths_nm=delivery["wavelengths_nm"],
-        pixel_scale_lod=delivery["pixel_scale_lod"],
+        grid=delivery["grid"],
         epoch_d=0.0,
         contrast_to_flux_fraction=SCALE,
         **drift,
@@ -73,17 +75,34 @@ def _tabulated(num_zern=NUM_ZERN):
 class TestLoadHwoSim:
     def test_assembles_complex_fields(self, delivery_dir, grid):
         path, e0, sens = delivery_dir
-        d = load_hwo_sim(path, wavelengths_nm=WAVELENGTHS_NM, dtype=np.complex128)
+        d = load_hwo_sim(
+            path,
+            wavelengths_nm=WAVELENGTHS_NM,
+            dtype=np.complex128,
+            frame=Frame(550.0, 6.5, "circumscribed"),
+        )
         np.testing.assert_array_equal(d["E0"], e0[..., 0] + 1j * e0[..., 1])
         np.testing.assert_array_equal(d["G"], sens[:, :, 0] + 1j * sens[:, :, 1])
         np.testing.assert_array_equal(d["dark_zone"], grid[0])
         assert d["dark_zone"].dtype == bool
-        assert d["pixel_scale_lod"] == pytest.approx(PIXEL_SCALE)
+        assert d["grid"].step == pytest.approx(PIXEL_SCALE)
+        assert d["grid"].frame == Frame(550.0, 6.5, "circumscribed")
+        np.testing.assert_allclose(
+            d["grid"].coordinates().x[0],
+            d["detector_axis"],
+            rtol=0,
+            atol=np.finfo(float).eps,
+        )
         np.testing.assert_array_equal(d["wavelengths_nm"], WAVELENGTHS_NM)
 
     def test_slices_leading_noll_terms(self, delivery_dir):
         path, _, sens = delivery_dir
-        d = load_hwo_sim(path, wavelengths_nm=WAVELENGTHS_NM, num_zern=2)
+        d = load_hwo_sim(
+            path,
+            wavelengths_nm=WAVELENGTHS_NM,
+            num_zern=2,
+            frame=Frame(550.0, 6.5, "circumscribed"),
+        )
         assert d["G"].shape == (NUM_WL, sens.shape[1], NUM_SEG, 2)
         expected = sens[:, :, 0, :, :2] + 1j * sens[:, :, 1, :, :2]
         expected = expected.astype(np.complex64)
@@ -91,15 +110,28 @@ class TestLoadHwoSim:
 
     def test_keeps_selected_wavelengths(self, delivery_dir):
         path = delivery_dir[0]
-        full = load_hwo_sim(path, wavelengths_nm=WAVELENGTHS_NM)
-        d = load_hwo_sim(path, wavelengths_nm=WAVELENGTHS_NM, wl_indices=(2, 0))
+        full = load_hwo_sim(
+            path,
+            wavelengths_nm=WAVELENGTHS_NM,
+            frame=Frame(550.0, 6.5, "circumscribed"),
+        )
+        d = load_hwo_sim(
+            path,
+            wavelengths_nm=WAVELENGTHS_NM,
+            wl_indices=(2, 0),
+            frame=Frame(550.0, 6.5, "circumscribed"),
+        )
         np.testing.assert_array_equal(d["E0"], full["E0"][[2, 0]])
         np.testing.assert_array_equal(d["G"], full["G"][[2, 0]])
         np.testing.assert_array_equal(d["wavelengths_nm"], WAVELENGTHS_NM[[2, 0]])
 
     def test_rejects_a_wavelength_grid_of_the_wrong_length(self, delivery_dir):
         with pytest.raises(ValueError, match="wavelengths"):
-            load_hwo_sim(delivery_dir[0], wavelengths_nm=WAVELENGTHS_NM[:2])
+            load_hwo_sim(
+                delivery_dir[0],
+                wavelengths_nm=WAVELENGTHS_NM[:2],
+                frame=Frame(550.0, 6.5, "circumscribed"),
+            )
 
 
 class TestSegmentZernikeSeries:
@@ -137,7 +169,10 @@ class TestHwoSimSpeckleField:
     @pytest.fixture
     def delivery(self, delivery_dir):
         return load_hwo_sim(
-            delivery_dir[0], wavelengths_nm=WAVELENGTHS_NM, dtype=np.complex128
+            delivery_dir[0],
+            wavelengths_nm=WAVELENGTHS_NM,
+            dtype=np.complex128,
+            frame=Frame(550.0, 6.5, "circumscribed"),
         )
 
     def test_is_a_speckle_field(self, delivery):
@@ -146,7 +181,10 @@ class TestHwoSimSpeckleField:
     def test_realize_is_the_linear_model_excess_on_the_dark_zone(self, delivery, grid):
         dark_zone, _ = grid
         field = _field(delivery, **_tabulated())
-        out = np.asarray(field.realize(wavelength_nm=552.0, time_s=100.0))
+        image = field.realize(wavelength_nm=552.0, time_d=100.0 * s2d)
+        assert image.grid == delivery["grid"]
+        assert (image.measure, image.quantity) == ("per_pixel", "stellar_flux_fraction")
+        out = np.asarray(image.data)
         e = delivery["E0"][1]
         g = delivery["G"][1].reshape(e.size, -1)
         de = g @ np.asarray(_tabulated()["drift_coefficients"][1]).ravel()
@@ -157,8 +195,8 @@ class TestHwoSimSpeckleField:
 
     def test_decomposition_sums_to_realize(self, delivery):
         field = _field(delivery, **_sinusoid())
-        cross, quad = field.decompose_delta(wavelength_nm=500.0, time_s=40.0)
-        total = field.realize(wavelength_nm=500.0, time_s=40.0)
+        cross, quad = field.decompose_delta(wavelength_nm=500.0, time_d=(40.0) * s2d)
+        total = field.realize(wavelength_nm=500.0, time_d=(40.0) * s2d).data
         np.testing.assert_allclose(np.asarray(cross + quad), np.asarray(total))
         assert np.all(np.asarray(quad) >= 0.0)
 
@@ -183,26 +221,32 @@ class TestHwoSimSpeckleField:
             ),
             axis=-1,
         )
-        np.testing.assert_allclose(np.asarray(field.coefficients(t)), expected)
+        np.testing.assert_allclose(np.asarray(field.coefficients((t) * s2d)), expected)
 
     def test_tabulated_coefficients_interpolate_and_hold(self, delivery):
         drift = _tabulated()
         field = _field(delivery, **drift)
         table = np.asarray(drift["drift_coefficients"])
         np.testing.assert_allclose(
-            np.asarray(field.coefficients(200.0)), 0.5 * (table[1] + table[2])
+            np.asarray(field.coefficients((200.0) * s2d)), 0.5 * (table[1] + table[2])
         )
-        np.testing.assert_allclose(np.asarray(field.coefficients(-50.0)), table[0])
-        np.testing.assert_allclose(np.asarray(field.coefficients(1e4)), table[2])
+        np.testing.assert_allclose(
+            np.asarray(field.coefficients((-50.0) * s2d)), table[0]
+        )
+        np.testing.assert_allclose(
+            np.asarray(field.coefficients((1e4) * s2d)), table[2]
+        )
         assert field.drift_is_tabulated
         assert field.num_mode == NUM_SEG * NUM_ZERN
 
     def test_realize_jits(self, delivery):
         field = _field(delivery, **_tabulated())
-        jitted = eqx.filter_jit(lambda f, t: f.realize(wavelength_nm=550.0, time_s=t))
+        jitted = eqx.filter_jit(
+            lambda f, t: f.realize(wavelength_nm=550.0, time_d=(t) * s2d).data
+        )
         np.testing.assert_allclose(
             np.asarray(jitted(field, 150.0)),
-            np.asarray(field.realize(wavelength_nm=550.0, time_s=150.0)),
+            np.asarray(field.realize(wavelength_nm=550.0, time_d=(150.0) * s2d).data),
         )
 
     def test_with_drift_swaps_only_the_drift(self, delivery):
@@ -211,8 +255,8 @@ class TestHwoSimSpeckleField:
         assert swapped.epoch_d == 1.0
         assert swapped.gain is field.gain
         np.testing.assert_allclose(
-            np.asarray(swapped.coefficients(10.0)),
-            2.0 * np.asarray(field.coefficients(10.0)),
+            np.asarray(swapped.coefficients(swapped.epoch_d + 10.0 * s2d)),
+            2.0 * np.asarray(field.coefficients((10.0) * s2d)),
         )
         with pytest.raises(ValueError, match="tabulated"):
             _field(delivery, **_tabulated()).with_drift(epoch_d=1.0)
@@ -222,8 +266,8 @@ class TestHwoSimSpeckleField:
         table = field.drift_coefficients
         swapped = field.with_tabulated_drift(drift_coefficients=-table)
         np.testing.assert_allclose(
-            np.asarray(swapped.coefficients(100.0)),
-            -np.asarray(field.coefficients(100.0)),
+            np.asarray(swapped.coefficients((100.0) * s2d)),
+            -np.asarray(field.coefficients((100.0) * s2d)),
         )
         with pytest.raises(ValueError, match="samples"):
             field.with_tabulated_drift(drift_coefficients=table[:2])

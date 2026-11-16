@@ -9,7 +9,7 @@ program that the propagation engine deliberately does not:
   piston/tip/tilt, deformable-mirror influence functions, Zernikes) plus
   per-mode temporal statistics produce a drifting wavefront-error realization,
   delivered as a time-varying speckle residual that implements the
-  ``optixstuff.AbstractSpeckleField`` contract on top of the ``(E_nom, G)``
+  ``optixstuff.LinearSpeckleField`` contract on top of the ``(E_nom, G)``
   linearization the engine provides.
 - **Wavefront control.** Wavefront-sensor estimators, a reconstructor over the
   same ``(E_nom, G)`` product (electric-field conjugation in space, a modal

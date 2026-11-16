@@ -4,14 +4,16 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
+from hwoutils.constants import d2s
+from hwoutils.grids import Frame, PixelGrid
 from physicaloptix import (
     Field,
     Fraunhofer,
-    Grid,
     ModeBasis,
     OpticalPath,
     PhaseScreen,
     PlaneKind,
+    ReparameterizedDetector,
     Stage,
 )
 
@@ -24,8 +26,7 @@ _KS = [(3, 1), (3, 0), (2, 1), (4, 1)]
 
 
 def _fourier_basis(npix, freqs, amp_nm=4.0):
-    x = np.asarray(Grid.pupil(npix).coords)
-    xg, yg = np.meshgrid(x, x)
+    xg, yg = map(np.asarray, PixelGrid.pupil(npix).coordinates())
     modes = []
     for kx, ky in freqs:
         arg = 2 * np.pi * (kx * xg + ky * yg)
@@ -37,10 +38,9 @@ def _fourier_basis(npix, freqs, amp_nm=4.0):
 
 def _setup(npix=16, aberration_nm=0.0):
     """WFE screen (drift carrier) + DM + science focal; drift lies in DM span."""
-    pupil = Grid.pupil(npix)
-    focal = Grid.focal(32, 0.5)
-    x = np.asarray(pupil.coords)
-    xg, yg = np.meshgrid(x, x)
+    pupil = PixelGrid.pupil(npix)
+    focal = PixelGrid.focal(32, 0.5, Frame(WL, 1.0, "circumscribed"))
+    xg, yg = map(np.asarray, pupil.coordinates())
     aperture = (xg**2 + yg**2 <= 0.25).astype(float)
     opd = aberration_nm * np.cos(2 * np.pi * (3 * xg + yg))
     field = Field(
@@ -57,8 +57,7 @@ def _setup(npix=16, aberration_nm=0.0):
             Stage("science", Fraunhofer(grid_in=pupil, grid_out=focal)),
         )
     )
-    fx = np.asarray(focal.coords)
-    fxg, fyg = np.meshgrid(fx, fx)
+    fxg, fyg = map(np.asarray, focal.coordinates())
     mask = jnp.asarray(
         ((np.abs(fxg - 3.0) < 0.6) & (np.abs(fyg - 1.0) < 0.6))
         | ((np.abs(fxg - 3.0) < 0.6) & (np.abs(fyg) < 0.6))
@@ -82,8 +81,10 @@ def _random_walk(n_steps, n_modes, scale_nm=0.15, seed=0):
 def _drift_fn(table, dt_s):
     table = jnp.asarray(table)
 
-    def drift(time_s):
-        index = jnp.clip(jnp.asarray(time_s / dt_s, dtype=int), 0, table.shape[0] - 1)
+    def drift(time_d):
+        index = jnp.clip(
+            jnp.asarray(time_d * d2s / dt_s, dtype=int), 0, table.shape[0] - 1
+        )
         return table[index]
 
     return drift
@@ -178,7 +179,14 @@ class TestMaintainDarkHole:
 class TestMakeDetector:
     def test_mean_preserving(self):
         image = jnp.asarray([[1.0, 0.5], [0.1, 0.0]])
-        detector = make_detector(flux=1e4, reference_peak=1.0, method="gaussian")
+        detector = make_detector(
+            wavelength_nm=500.0,
+            flux=1e4,
+            reference_peak=1.0,
+            detector_model=ReparameterizedDetector(
+                pixel_scale_arcsec=0.01, shape=image.shape
+            ),
+        )
         keys = jax.random.split(jax.random.PRNGKey(0), 400)
         draws = jnp.stack([detector(image, k) for k in keys])
         np.testing.assert_allclose(
@@ -187,8 +195,20 @@ class TestMakeDetector:
 
     def test_more_flux_means_less_noise_not_more_gain(self):
         image = jnp.full((4, 4), 0.5)
-        dim = make_detector(flux=1e3, method="gaussian")
-        bright = make_detector(flux=1e6, method="gaussian")
+        dim = make_detector(
+            wavelength_nm=500.0,
+            flux=1e3,
+            detector_model=ReparameterizedDetector(
+                pixel_scale_arcsec=0.01, shape=image.shape
+            ),
+        )
+        bright = make_detector(
+            wavelength_nm=500.0,
+            flux=1e6,
+            detector_model=ReparameterizedDetector(
+                pixel_scale_arcsec=0.01, shape=image.shape
+            ),
+        )
         keys = jax.random.split(jax.random.PRNGKey(1), 200)
         std_dim = float(jnp.std(jnp.stack([dim(image, k) for k in keys])))
         std_bright = float(jnp.std(jnp.stack([bright(image, k) for k in keys])))

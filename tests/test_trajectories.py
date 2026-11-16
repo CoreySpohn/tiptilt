@@ -12,6 +12,8 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
+from hwoutils.constants import s2d
+from hwoutils.grids import Frame, PixelGrid
 
 from tiptilt.speckle import (
     TabulatedSpeckleField,
@@ -550,9 +552,19 @@ class TestFeedsATabulatedField:
             ),
             creep_trajectory(jnp.asarray([1e-5, 0.0]), times_s=times),
         )
-        field = TabulatedSpeckleField(e_nom, g, times, eps_table, input_energy=0.25**2)
-        early = field.realize(wavelength_nm=500.0, time_s=0.0)
-        late = field.realize(wavelength_nm=500.0, time_s=3000.0)
+        field = TabulatedSpeckleField(
+            e_nom,
+            g,
+            times,
+            eps_table,
+            input_energy=0.25**2,
+            grid=PixelGrid.regular(
+                e_nom.shape, 0.25, "lod", frame=Frame(500.0, 1.0, "circumscribed")
+            ),
+            reference_wavelength_nm=500.0,
+        )
+        early = field.realize(wavelength_nm=500.0, time_d=(0.0) * s2d).data
+        late = field.realize(wavelength_nm=500.0, time_d=(3000.0) * s2d).data
         assert early.shape == (ny, nx)
         assert jnp.all(jnp.isfinite(late))
         assert not jnp.allclose(early, late)
@@ -722,16 +734,26 @@ class TestExposureAveragingOnARealField:
         rng = np.random.default_rng(5)
         g = jnp.asarray(rng.standard_normal((2, 4, 4)) * (1 + 1j))
         e_nom = jnp.asarray(rng.standard_normal((4, 4)) * (1 + 1j))
-        return TabulatedSpeckleField(e_nom, g, times, eps_table, input_energy=0.25**2)
+        return TabulatedSpeckleField(
+            e_nom,
+            g,
+            times,
+            eps_table,
+            input_energy=0.25**2,
+            grid=PixelGrid.regular(
+                e_nom.shape, 0.25, "lod", frame=Frame(500.0, 1.0, "circumscribed")
+            ),
+            reference_wavelength_nm=500.0,
+        )
 
     def test_matches_the_hand_averaged_midpoints(self):
         times = jnp.asarray(np.linspace(0.0, 400.0, 41))
         eps = ou_trajectory(jnp.eye(2), 60.0, key=jax.random.PRNGKey(0), times_s=times)
         field = self._field(times, eps)
-        got = field.realize_average(wavelength_nm=600.0, exposure_s=100.0, n_sub=4)
+        got = field.realize_average(wavelength_nm=600.0, exposure_s=100.0, n_sub=4).data
         expected = (
             sum(
-                field.realize(wavelength_nm=600.0, time_s=t)
+                field.realize(wavelength_nm=600.0, time_d=(t) * s2d).data
                 for t in (12.5, 37.5, 62.5, 87.5)
             )
             / 4.0
@@ -757,7 +779,7 @@ class TestExposureAveragingOnARealField:
                         jnp.mean(
                             field.realize_average(
                                 wavelength_nm=600.0, exposure_s=exposure, n_sub=32
-                            )
+                            ).data
                         )
                     )
                 )

@@ -2,7 +2,8 @@
 
 import jax.numpy as jnp
 import numpy as np
-from physicaloptix import Field, Grid, PlaneKind, ZernikeWavefrontSensor, zernike_basis
+from hwoutils.grids import PixelGrid
+from physicaloptix import Field, PlaneKind, ZernikeWavefrontSensor, zernike_basis
 from physicaloptix.elements.basis import ModeBasis
 
 from tiptilt.sensing import zwfs_calibrate, zwfs_reconstruct
@@ -18,15 +19,14 @@ def _low_order_basis(grid):
 
 
 def _aperture_field(grid):
-    coords = np.asarray(grid.coords)
-    xg, yg = np.meshgrid(coords, coords)
+    xg, yg = map(np.asarray, grid.coordinates())
     disk = (xg**2 + yg**2 <= 0.25).astype(complex)
     return Field(data=jnp.asarray(disk), grid=grid, plane=PlaneKind.PUPIL)
 
 
 class TestZwfsReconstruction:
     def test_recovers_injected_low_order_coefficients(self):
-        grid = Grid.pupil(NPUP)
+        grid = PixelGrid.pupil(NPUP)
         sensor = ZernikeWavefrontSensor.build(npup=NPUP, q=4)
         aperture = _aperture_field(grid)
         modes = _low_order_basis(grid)
@@ -48,7 +48,7 @@ class TestZwfsReconstruction:
         np.testing.assert_allclose(np.asarray(c_hat), np.asarray(c_true), rtol=0.1)
 
     def test_flat_wavefront_reconstructs_near_zero(self):
-        grid = Grid.pupil(NPUP)
+        grid = PixelGrid.pupil(NPUP)
         sensor = ZernikeWavefrontSensor.build(npup=NPUP, q=4)
         aperture = _aperture_field(grid)
         modes = _low_order_basis(grid)

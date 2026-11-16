@@ -4,6 +4,8 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
+from hwoutils.constants import s2d
+from hwoutils.grids import Frame, PixelGrid
 from physicaloptix import ChannelLinearization, MultiChannelLinearization
 
 from tiptilt.speckle import TabulatedSpeckleField, correlated_channel_fields
@@ -32,7 +34,12 @@ def _synthetic_mcl(key, names=("a", "b"), pixel_scales=None):
         ) * 1e-3
         channels.append(
             ChannelLinearization(
-                name=name, e_nom=e_nom, g_shared=g, pixel_scale_lod=pixel_scales[name]
+                name=name,
+                e_nom=e_nom,
+                g_shared=g,
+                grid=PixelGrid.focal(
+                    NPIX, pixel_scales[name], Frame(500.0, 1.0, "circumscribed")
+                ),
             )
         )
     return MultiChannelLinearization(
@@ -77,13 +84,13 @@ class TestCorrelatedChannelFields:
             psd=psd,
         )
         for name in ("a", "b"):
-            assert float(fields[name].normalization) == pytest.approx(
-                mcl.input_energy / mcl[name].pixel_scale_lod ** 2
+            assert float(fields[name].input_energy) == pytest.approx(mcl.input_energy)
+            assert fields[name].grid == mcl[name].grid
+            np.testing.assert_allclose(
+                fields[name].G,
+                mcl[name].g_shared * np.sqrt(mcl[name].grid.pixel_area),
+                rtol=4 * np.finfo(float).eps,
             )
-        np.testing.assert_array_equal(
-            np.asarray(fields["a"].G), np.asarray(mcl["a"].g_shared)
-        )
-        assert fields["a"].coherent  # the common-mode signal is a FIELD effect
 
     def test_cross_channel_field_covariance_matches_the_shared_block(self):
         """Time-averaged Cov(dE_a, dE_b) approaches G_a Sigma (G_b)^H."""
@@ -161,11 +168,15 @@ class TestCorrelatedChannelFields:
             frequencies_hz=frequencies,
             psd=psd,
         )
-        assert float(fields["a"].normalization) == pytest.approx(_E_IN / 0.25**2)
-        assert float(fields["b"].normalization) == pytest.approx(_E_IN / 0.5**2)
-        assert float(fields["a"].normalization) == pytest.approx(
-            4.0 * float(fields["b"].normalization)
-        )
+        for name in ("a", "b"):
+            field = fields[name]
+            eps = field.coefficients(0.0)
+            de = jnp.einsum("m,myx->yx", eps, mcl[name].g_shared)
+            parent = 2 * jnp.real(jnp.conj(mcl[name].e_nom) * de) + abs(de) ** 2
+            parent *= mcl[name].grid.pixel_area / _E_IN
+            np.testing.assert_allclose(
+                field.realize(wavelength_nm=500.0).data, parent, rtol=1e-12, atol=1e-20
+            )
 
 
 class TestTabulatedEpsAccessor:
@@ -178,12 +189,23 @@ class TestTabulatedEpsAccessor:
             times_s=times,
             eps_table=table,
             input_energy=_E_IN,
+            grid=PixelGrid.regular(
+                (jnp.zeros((4, 4), dtype=complex)).shape,
+                0.25,
+                "lod",
+                frame=Frame(500.0, 1.0, "circumscribed"),
+            ),
+            reference_wavelength_nm=500.0,
         )
         np.testing.assert_allclose(
-            np.asarray(field.eps(0.5)), np.asarray([0.5, 1.0]), atol=1e-12
+            np.asarray(field.coefficients((0.5) * s2d)),
+            np.asarray([0.5, 1.0]),
+            atol=1e-12,
         )
         np.testing.assert_allclose(
-            np.asarray(field.eps(5.0)), np.asarray([2.0, 4.0]), atol=1e-12
+            np.asarray(field.coefficients((5.0) * s2d)),
+            np.asarray([2.0, 4.0]),
+            atol=1e-12,
         )  # held at the endpoint
 
 
@@ -202,6 +224,6 @@ class TestOptixstuffConformance:
         )
         for field in fields.values():
             assert isinstance(field, AbstractSpeckleField)
-            delta = field.realize(wavelength_nm=500.0, time_s=30.0)
+            delta = field.realize(wavelength_nm=500.0, time_d=(30.0) * s2d).data
             assert delta.shape == (NPIX, NPIX)
             assert bool(jnp.all(jnp.isfinite(delta)))

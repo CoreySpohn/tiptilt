@@ -2,10 +2,10 @@
 
 import jax.numpy as jnp
 import numpy as np
+from hwoutils.grids import Frame, PixelGrid
 from physicaloptix import (
     Field,
     Fraunhofer,
-    Grid,
     ModeBasis,
     OpticalPath,
     PhaseScreen,
@@ -26,8 +26,7 @@ _KS = [(3, 1), (3, 0), (3, 2), (2, 1), (4, 1), (3, -1)]
 
 
 def _fourier_dm(npix, amp_nm=5.0):
-    x = np.asarray(Grid.pupil(npix).coords)
-    x_grid, y_grid = np.meshgrid(x, x)
+    x_grid, y_grid = map(np.asarray, PixelGrid.pupil(npix).coordinates())
     modes = []
     for kx, ky in _KS:
         arg = 2 * np.pi * (kx * x_grid + ky * y_grid)
@@ -38,10 +37,9 @@ def _fourier_dm(npix, amp_nm=5.0):
 
 
 def _setup(npix=16):
-    pupil = Grid.pupil(npix)
-    focal = Grid.focal(32, 0.5)
-    x = np.asarray(pupil.coords)
-    x_grid, y_grid = np.meshgrid(x, x)
+    pupil = PixelGrid.pupil(npix)
+    focal = PixelGrid.focal(32, 0.5, Frame(WL, 1.0, "circumscribed"))
+    x_grid, y_grid = map(np.asarray, pupil.coordinates())
     aperture = (x_grid**2 + y_grid**2 <= 0.25).astype(float)
     aberration = 3.0 * np.cos(2 * np.pi * (3 * x_grid + 1 * y_grid))
     e_in = aperture * np.exp(1j * 2 * np.pi * aberration / WL)
@@ -52,8 +50,7 @@ def _setup(npix=16):
             Stage("science", Fraunhofer(grid_in=pupil, grid_out=focal)),
         )
     )
-    fx = np.asarray(focal.coords)
-    fx_grid, fy_grid = np.meshgrid(fx, fx)
+    fx_grid, fy_grid = map(np.asarray, focal.coordinates())
     mask = (np.abs(fx_grid - 3.0) < 0.4) & (np.abs(fy_grid - 1.0) < 0.4)
     return path, field, jnp.asarray(mask)
 

@@ -10,10 +10,10 @@ recovered from probe images).
 import jax.numpy as jnp
 import numpy as np
 import pytest
+from hwoutils.grids import Frame, PixelGrid
 from physicaloptix import (
     Field,
     Fraunhofer,
-    Grid,
     MultiScaleVortex,
     OpticalPath,
     PhaseScreen,
@@ -30,16 +30,16 @@ NPUP = 48
 
 
 def _disk(grid, radius):
-    x = np.asarray(grid.coords)
-    xx, yy = np.meshgrid(x, x)
+    xx, yy = map(np.asarray, grid.coordinates())
     return (xx**2 + yy**2) <= radius**2
 
 
 def _vortex_path():
-    pupil = Grid.pupil(NPUP)
-    focal = Grid.focal(96, 0.25)  # FOV 12 lambda/D
-    coords = np.asarray(pupil.coords)
-    xg, yg = np.meshgrid(coords, coords)
+    pupil = PixelGrid.pupil(NPUP)
+    focal = PixelGrid.focal(
+        96, 0.25, Frame(WL, 1.0, "circumscribed")
+    )  # FOV 12 lambda/D
+    xg, yg = map(np.asarray, pupil.coordinates())
     aperture = _disk(pupil, 0.5).astype(complex)
     lyot = _disk(pupil, 0.45).astype(float)
     dm = fourier_dm_basis(pupil, n_actuators=12, k_min=3.0, k_max=6.0)
@@ -73,8 +73,7 @@ def _vortex_path():
         plane=PlaneKind.PUPIL,
     )
     model_field = Field(data=jnp.asarray(aperture), grid=pupil, plane=PlaneKind.PUPIL)
-    fx = np.asarray(focal.coords)
-    fxg, fyg = np.meshgrid(fx, fx)
+    fxg, fyg = map(np.asarray, focal.coordinates())
     r = np.hypot(fxg, fyg)
     # One-sided (single-DM-nullable) D-shaped dark zone, a real 2D region.
     mask = jnp.asarray((r >= 3.0) & (r <= 6.0) & (fxg > 1.0))

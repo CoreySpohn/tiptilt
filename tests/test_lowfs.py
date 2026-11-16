@@ -4,6 +4,7 @@ import equinox as eqx
 import jax.numpy as jnp
 import jax.random as jr
 import pytest
+from optixstuff import Detector
 
 from tiptilt.lowfs import lowfs_calibrate, run_pointing_loop
 from tiptilt.maintenance import make_detector
@@ -107,7 +108,12 @@ def test_pointing_scenario_through_testbed(scenario):
 def test_detector_noise_loop_still_suppresses(scenario):
     p = scenario.params
     detector = make_detector(
-        flux=1e7, exposure_time=1.0, read_noise_e=1.0, quantum_efficiency=0.9
+        wavelength_nm=500.0,
+        flux=1e7,
+        exposure_time=1.0,
+        detector_model=Detector(
+            pixel_scale_arcsec=0.01, shape=(16, 16), read_noise_e_rms=1.0, qe=0.9
+        ),
     )
     result = run_pointing_loop(
         p["system"],

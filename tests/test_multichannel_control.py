@@ -3,12 +3,12 @@
 import jax.numpy as jnp
 import numpy as np
 import pytest
+from hwoutils.grids import Frame, PixelGrid
 from physicaloptix import (
     BeamSplitter,
     Branch,
     Field,
     Fraunhofer,
-    Grid,
     ModeBasis,
     OpticalPath,
     OpticalSystem,
@@ -29,8 +29,7 @@ WL, NPIX = 500.0, 16
 
 
 def _basis(npix, freqs, amp_nm=4.0):
-    x = np.asarray(Grid.pupil(npix).coords)
-    xg, yg = np.meshgrid(x, x)
+    xg, yg = map(np.asarray, PixelGrid.pupil(npix).coordinates())
     modes = []
     for kx, ky in freqs:
         arg = 2 * np.pi * (kx * xg + ky * yg)
@@ -42,10 +41,9 @@ def _basis(npix, freqs, amp_nm=4.0):
 
 def _system(npix=NPIX, sci_ncpa_nm=0.0, wfs_ncpa_modes=None):
     """Trunk: drift screen + shared corrector; two focal arms with private NCPA."""
-    grid = Grid.pupil(npix)
-    focal = Grid.focal(32, 0.5)
-    x = np.asarray(grid.coords)
-    xg, yg = np.meshgrid(x, x)
+    grid = PixelGrid.pupil(npix)
+    focal = PixelGrid.focal(32, 0.5, Frame(500.0, 1.0, "circumscribed"))
+    xg, yg = map(np.asarray, grid.coordinates())
     aperture = (xg**2 + yg**2 <= 0.25).astype(complex)
     shared = _basis(npix, [(3, 1), (3, 0)])  # 4 shared modes
     corrector = _basis(npix, [(3, 1), (3, 0)])
@@ -82,8 +80,7 @@ def _system(npix=NPIX, sci_ncpa_nm=0.0, wfs_ncpa_modes=None):
         branches=(Branch("sci", "transmit", sci), Branch("wfs", "reflect", wfs)),
     )
     field = Field(data=jnp.asarray(aperture), grid=grid, plane=PlaneKind.PUPIL)
-    fx = np.asarray(focal.coords)
-    fxg, fyg = np.meshgrid(fx, fx)
+    fxg, fyg = map(np.asarray, focal.coordinates())
     mask = jnp.asarray((np.abs(fxg - 3.0) < 0.6) & (np.abs(np.abs(fyg) - 0.5) < 0.7))
     masks = {"sci": mask, "wfs": mask}
     return system, field, masks

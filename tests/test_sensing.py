@@ -3,10 +3,10 @@
 import jax
 import jax.numpy as jnp
 import numpy as np
+from hwoutils.grids import Frame, PixelGrid
 from physicaloptix import (
     Field,
     Fraunhofer,
-    Grid,
     OpticalPath,
     PhaseScreen,
     PlaneKind,
@@ -25,10 +25,9 @@ from tiptilt.sensing import (
 
 def _simple_dm_path(npix=32, nfoc=64, pscale=0.25, wl=500.0):
     """A pupil -> Fourier-DM -> focal path plus its unaberrated model field."""
-    pupil = Grid.pupil(npix)
-    focal = Grid.focal(nfoc, pscale)
-    coords = np.asarray(pupil.coords)
-    xg, yg = np.meshgrid(coords, coords)
+    pupil = PixelGrid.pupil(npix)
+    focal = PixelGrid.focal(nfoc, pscale, Frame(500.0, 1.0, "circumscribed"))
+    xg, yg = map(np.asarray, pupil.coordinates())
     aperture = (xg**2 + yg**2 <= 0.25).astype(complex)
     dm_basis = fourier_dm_basis(pupil, n_actuators=16, k_min=2.0, k_max=7.0)
     path = OpticalPath(
@@ -201,7 +200,9 @@ class TestEstimateFieldThroughPath:
         assert err < 0.15 * float(jnp.max(jnp.abs(e_true)))
 
     def test_more_flux_reduces_error(self):
-        from physicaloptix import read_detector
+        from optixstuff import Detector
+
+        from tiptilt.maintenance import make_detector
 
         path, dm_basis, input_field, _, mask, focal_data = self._setup()
         e_true = focal_data[mask]
@@ -210,16 +211,14 @@ class TestEstimateFieldThroughPath:
         probes = probe_set(dm_basis, amplitude_nm=3.0, n_probes=6)
 
         def mean_error(flux):
-            def detector(image, key):
-                counts = read_detector(
-                    image / peak,
-                    key,
-                    flux=flux,
-                    exposure_time=1.0,
-                    read_noise_e=0.0,
-                    method="poisson",
-                )
-                return peak * counts / flux  # unbiased, back to image units
+            detector = make_detector(
+                wavelength_nm=500.0,
+                detector_model=Detector(
+                    pixel_scale_arcsec=0.01, shape=focal_data.shape
+                ),
+                flux=flux,
+                reference_peak=peak,
+            )
 
             errs = []
             for s in range(8):

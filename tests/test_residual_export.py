@@ -3,11 +3,12 @@
 import equinox as eqx
 import jax.numpy as jnp
 import numpy as np
+from hwoutils.constants import d2s, s2d
+from hwoutils.grids import Frame, PixelGrid
 from optixstuff.speckle import AbstractSpeckleField
 from physicaloptix import (
     Field,
     Fraunhofer,
-    Grid,
     ModeBasis,
     OpticalPath,
     PhaseScreen,
@@ -23,8 +24,7 @@ _KS = [(3, 1), (3, 0), (2, 1), (4, 1)]
 
 
 def _fourier_basis(npix, freqs, amp_nm=4.0):
-    x = np.asarray(Grid.pupil(npix).coords)
-    xg, yg = np.meshgrid(x, x)
+    xg, yg = map(np.asarray, PixelGrid.pupil(npix).coordinates())
     modes = []
     for kx, ky in freqs:
         arg = 2 * np.pi * (kx * xg + ky * yg)
@@ -35,10 +35,9 @@ def _fourier_basis(npix, freqs, amp_nm=4.0):
 
 
 def _setup(npix=16):
-    pupil = Grid.pupil(npix)
-    focal = Grid.focal(32, 0.5)
-    x = np.asarray(pupil.coords)
-    xg, yg = np.meshgrid(x, x)
+    pupil = PixelGrid.pupil(npix)
+    focal = PixelGrid.focal(32, 0.5, Frame(WL, 1.0, "circumscribed"))
+    xg, yg = map(np.asarray, pupil.coordinates())
     aperture = (xg**2 + yg**2 <= 0.25).astype(complex)
     field = Field(data=jnp.asarray(aperture), grid=pupil, plane=PlaneKind.PUPIL)
     drift_basis = _fourier_basis(npix, _KS[:2])  # 4 modes, inside the DM span
@@ -50,8 +49,7 @@ def _setup(npix=16):
             Stage("science", Fraunhofer(grid_in=pupil, grid_out=focal)),
         )
     )
-    fx = np.asarray(focal.coords)
-    fxg, fyg = np.meshgrid(fx, fx)
+    fxg, fyg = map(np.asarray, focal.coordinates())
     mask = jnp.asarray((np.abs(fxg - 3.0) < 0.8) & (np.abs(fyg - 1.0) < 0.8))
     return path, field, mask
 
@@ -59,8 +57,8 @@ def _setup(npix=16):
 def _ramp_drift(scale_nm=0.3):
     direction = jnp.asarray([1.0, -0.6, 0.8, -0.4])
 
-    def eps(time_s):
-        return scale_nm * time_s * direction
+    def eps(time_d):
+        return scale_nm * time_d * d2s * direction
 
     return eps
 
@@ -125,14 +123,15 @@ def test_realized_field_matches_direct_propagation():
         drifted = eqx.tree_at(
             lambda p: (p.stages[0].op.basis.coeffs, p.stages[1].op.basis.coeffs),
             path,
-            (eps(k * COMMON["dt_s"]), trajectory[k]),
+            (eps(k * COMMON["dt_s"] * s2d), trajectory[k]),
         )
         out, _ = drifted.propagate(field)
         # compare in the seam's flux-fraction units: floor + delta == full
-        norm = residual.normalization
-        direct = jnp.abs(out.data) ** 2 / norm
-        linear = jnp.abs(residual.e_nom) ** 2 / norm + residual.realize(
-            wavelength_nm=WL, time_s=k * COMMON["dt_s"]
+        norm = residual.input_energy
+        direct = jnp.abs(out.data) ** 2 * out.grid.pixel_area / norm
+        linear = (
+            jnp.abs(residual.e_nom) ** 2 / norm
+            + residual.realize(wavelength_nm=WL, time_d=(k * COMMON["dt_s"]) * s2d).data
         )
         err = jnp.linalg.norm(linear - direct) / jnp.linalg.norm(direct)
         assert float(err) < 1e-3, f"frame {k}: rel err {float(err):.2e}"
@@ -147,8 +146,8 @@ def test_seam_contract_and_closed_beats_open():
     opened, _ = maintained_residual_field(path, field, 1, mask, **kwargs, **open_kwargs)
     assert isinstance(closed, AbstractSpeckleField)
     late = (COMMON["n_steps"] - 1) * COMMON["dt_s"]
-    d_closed = closed.realize(wavelength_nm=WL, time_s=late)
-    d_open = opened.realize(wavelength_nm=WL, time_s=late)
+    d_closed = closed.realize(wavelength_nm=WL, time_d=(late) * s2d).data
+    d_open = opened.realize(wavelength_nm=WL, time_d=(late) * s2d).data
     assert d_closed.shape == d_open.shape and bool(jnp.all(jnp.isfinite(d_closed)))
     # the seam carries the controller conditioning: closed-loop residual
     # energy in the hole is far below open loop

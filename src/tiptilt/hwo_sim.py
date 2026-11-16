@@ -41,6 +41,8 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from astropy.io import fits
+from hwoutils.constants import d2s
+from hwoutils.grids import Frame, Image, PixelGrid
 from jax.typing import ArrayLike
 from jaxtyping import Array
 from optixstuff.speckle import AbstractSpeckleField
@@ -50,6 +52,7 @@ def load_hwo_sim(
     data_dir: Path | str,
     *,
     wavelengths_nm: ArrayLike,
+    frame: Frame,
     num_zern: int | None = None,
     wl_indices: tuple[int, ...] | None = None,
     dtype: type = np.complex64,
@@ -68,6 +71,7 @@ def load_hwo_sim(
         wavelengths_nm: The wavelength of each E0 plane, in nanometers. The
             files do not record it; it is the filter definition of the
             hwo_sim run that wrote them.
+        frame: Diameter convention and reference wavelength from run provenance.
         num_zern: Keep only the first ``num_zern`` Zernike TERMS per segment,
             Noll-ordered. Terms are not radial orders: 11 means Noll 1-11,
             radial orders 0-3 complete plus spherical. None keeps all.
@@ -77,7 +81,7 @@ def load_hwo_sim(
     Returns:
         Dict with keys ``E0`` (num_wl, num_pix), ``G`` (num_wl, num_pix,
         num_seg, num_zern), ``dark_zone`` (ny, nx) bool, ``detector_axis``
-        (nx,) in lambda/D, ``wavelengths_nm``, and ``pixel_scale_lod``.
+        (nx,) in lambda/D, ``wavelengths_nm``, and ``grid`` with its Frame.
 
     Raises:
         ValueError: If ``wavelengths_nm`` does not have one entry per E0 plane.
@@ -87,7 +91,21 @@ def load_hwo_sim(
     axis = np.asarray(
         fits.getdata(data_dir / "detector_axis.fits"), dtype=float
     ).ravel()
-    pixel_scale_lod = float(np.mean(np.diff(axis)))
+    step = float(np.mean(np.diff(axis)))
+    if (
+        axis.size != dark_zone.shape[1]
+        or step <= 0
+        or not np.allclose(np.diff(axis), step, rtol=1e-10, atol=0.0)
+    ):
+        raise ValueError("detector_axis must be ascending and uniformly sampled")
+    # The format uses the same coordinate origin and spacing on both axes.
+    grid = PixelGrid.regular(
+        dark_zone.shape,
+        step,
+        "lod",
+        center=(-axis[0] / step, -axis[0] / step),
+        frame=frame,
+    )
 
     e0_raw = fits.getdata(data_dir / "E0.fits")
     e0 = (e0_raw[..., 0] + 1j * e0_raw[..., 1]).astype(dtype)
@@ -121,7 +139,7 @@ def load_hwo_sim(
         "dark_zone": dark_zone,
         "detector_axis": axis,
         "wavelengths_nm": wl_nm,
-        "pixel_scale_lod": pixel_scale_lod,
+        "grid": grid,
     }
 
 
@@ -209,7 +227,7 @@ class HwoSimSpeckleField(AbstractSpeckleField):
     the limit for whichever form is loaded.
     """
 
-    pixel_scale_lod: float
+    grid: PixelGrid
     epoch_d: float
     wavelengths_nm: Array
     e_nom: Array  # complex (num_wl, num_pix): nominal field on the pixel list
@@ -230,7 +248,7 @@ class HwoSimSpeckleField(AbstractSpeckleField):
         dark_zone: ArrayLike,
         *,
         wavelengths_nm: ArrayLike,
-        pixel_scale_lod: float,
+        grid: PixelGrid,
         epoch_d: float = 0.0,
         contrast_to_flux_fraction: float,
         amplitude: Array | None = None,
@@ -243,7 +261,7 @@ class HwoSimSpeckleField(AbstractSpeckleField):
 
         The first five arguments are the like-named entries of
         :func:`load_hwo_sim`'s result (``E0``, ``G``, ``dark_zone``,
-        ``wavelengths_nm``, ``pixel_scale_lod``).
+        ``wavelengths_nm``, ``grid``).
 
         Args:
             e_nom: Nominal field, (num_wl, num_pix) complex, sqrt(contrast).
@@ -252,7 +270,7 @@ class HwoSimSpeckleField(AbstractSpeckleField):
             dark_zone: (ny, nx) mask whose True pixels, in C order, are the
                 pixel axis of ``e_nom`` and ``G``.
             wavelengths_nm: Wavelength of each plane, (num_wl,).
-            pixel_scale_lod: Plate scale in lambda/D per pixel.
+            grid: Native sampling and Frame from replay provenance.
             epoch_d: Days from the scene epoch mapping to ``time_s = 0``. Default 0.0.
             contrast_to_flux_fraction: Scale from peak-referenced contrast to
                 flux fraction per pixel.
@@ -268,7 +286,9 @@ class HwoSimSpeckleField(AbstractSpeckleField):
         dark_zone = np.asarray(dark_zone)
         num_wl, num_pix = np.shape(e_nom)
 
-        self.pixel_scale_lod = float(pixel_scale_lod)
+        self.grid = grid
+        if grid.unit != "lod" or grid.shape != dark_zone.shape:
+            raise ValueError("grid must be native lod and match dark_zone")
         self.epoch_d = float(epoch_d)
         self.wavelengths_nm = jnp.asarray(wavelengths_nm, dtype=float)
         self.e_nom = jnp.asarray(e_nom)
@@ -353,8 +373,8 @@ class HwoSimSpeckleField(AbstractSpeckleField):
         """Whether the drift is a tabulated series rather than sinusoids."""
         return self.drift_coefficients is not None
 
-    def coefficients(self, time_s: ArrayLike) -> Array:
-        """Per-segment Zernike coefficients at a time, in nm RMS wavefront.
+    def coefficients(self, time_d: ArrayLike) -> Array:
+        """Per-segment Zernike coefficients at scene time_d, in nm RMS wavefront.
 
         Returns shape ``(num_seg, num_zern)``. For a sinusoid drift the
         per-mode components are summed here, so callers never see the
@@ -366,7 +386,7 @@ class HwoSimSpeckleField(AbstractSpeckleField):
         The branch is on ``None``-ness, which is PyTree structure rather than
         a traced value, so it resolves at trace time under ``jit``.
         """
-        t = jnp.asarray(time_s, dtype=float)
+        t = (jnp.asarray(time_d, dtype=float) - self.epoch_d) * d2s
         if self.drift_coefficients is None:
             wave = self.amplitude * jnp.cos(
                 2.0 * jnp.pi * self.frequency_hz * t + self.phase
@@ -543,7 +563,7 @@ class HwoSimSpeckleField(AbstractSpeckleField):
         return phase_tol_rad / (2.0 * np.pi * eps * f_max)
 
     def decompose_delta(
-        self, *, wavelength_nm: ArrayLike, time_s: ArrayLike = 0.0
+        self, *, wavelength_nm: ArrayLike, time_d: ArrayLike = 0.0
     ) -> tuple[Array, Array]:
         """The two terms of the speckle delta, separately, as flux fractions.
 
@@ -557,7 +577,7 @@ class HwoSimSpeckleField(AbstractSpeckleField):
         index = self._wavelength_index(wavelength_nm)
         e_nom = jnp.take(self.e_nom, index, axis=0)
         gain = jnp.take(self.gain, index, axis=0)
-        delta_e = gain @ self.coefficients(time_s).ravel().astype(gain.dtype)
+        delta_e = gain @ self.coefficients(time_d).ravel().astype(gain.dtype)
         cross = 2.0 * jnp.real(jnp.conj(e_nom) * delta_e)
         quadratic = jnp.abs(delta_e) ** 2
         return (
@@ -569,8 +589,8 @@ class HwoSimSpeckleField(AbstractSpeckleField):
         self,
         *,
         wavelength_nm: ArrayLike,
-        time_s: ArrayLike = 0.0,
-    ) -> Array:
+        time_d: ArrayLike = 0.0,
+    ) -> Image:
         """Wavefront-error-induced excess over the static floor.
 
         Returns ``|E_nom + G eps(t)|^2 - |E_nom|^2`` as flux fraction per
@@ -579,6 +599,12 @@ class HwoSimSpeckleField(AbstractSpeckleField):
         index = self._wavelength_index(wavelength_nm)
         e_nom = jnp.take(self.e_nom, index, axis=0)
         gain = jnp.take(self.gain, index, axis=0)
-        delta_e = gain @ self.coefficients(time_s).ravel().astype(gain.dtype)
+        delta_e = gain @ self.coefficients(time_d).ravel().astype(gain.dtype)
         delta = 2.0 * jnp.real(jnp.conj(e_nom) * delta_e) + jnp.abs(delta_e) ** 2
-        return self._scatter(delta.real) * self.contrast_to_flux_fraction
+        return Image(
+            self._scatter(delta.real) * self.contrast_to_flux_fraction,
+            self.grid,
+            (),
+            "per_pixel",
+            "stellar_flux_fraction",
+        )

@@ -4,7 +4,8 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-from optixstuff.speckle import AbstractSpeckleField
+from hwoutils.constants import s2d
+from hwoutils.grids import Frame, PixelGrid
 
 from tiptilt.speckle import (
     TabulatedSpeckleField,
@@ -31,63 +32,9 @@ def ingredients():
         "times_s": jnp.asarray([0.0, 10.0, 20.0]),
         "eps_table": jnp.asarray([[0.0, 0.0], [1.0, -1.0], [2.0, 0.5]]),
         "input_energy": _e_in(3.0),
+        "grid": PixelGrid.focal(4, 0.25, Frame(500.0, 1.0, "circumscribed")),
+        "reference_wavelength_nm": 500.0,
     }
-
-
-def _incoherent_delta(g, eps, norm):
-    g_eps = jnp.tensordot(jnp.asarray(eps), g, axes=1)
-    return np.asarray(jnp.abs(g_eps) ** 2 / norm)
-
-
-class TestTabulatedSpeckleField:
-    def test_is_a_speckle_field(self, ingredients):
-        assert isinstance(TabulatedSpeckleField(**ingredients), AbstractSpeckleField)
-
-    def test_realize_returns_a_nonnegative_contrast_map(self, ingredients):
-        out = TabulatedSpeckleField(**ingredients).realize(
-            wavelength_nm=500.0, time_s=5.0
-        )
-        assert out.shape == ingredients["G"].shape[1:]
-        assert jnp.all(out >= 0.0)
-
-    def test_matches_exact_eps_at_a_node(self, ingredients):
-        out = TabulatedSpeckleField(**ingredients).realize(
-            wavelength_nm=500.0, time_s=10.0
-        )
-        expected = _incoherent_delta(ingredients["G"], [1.0, -1.0], 3.0)
-        np.testing.assert_allclose(np.asarray(out), expected, rtol=1e-12)
-
-    def test_interpolates_eps_between_nodes(self, ingredients):
-        out = TabulatedSpeckleField(**ingredients).realize(
-            wavelength_nm=500.0, time_s=5.0
-        )
-        expected = _incoherent_delta(ingredients["G"], [0.5, -0.5], 3.0)
-        np.testing.assert_allclose(np.asarray(out), expected, rtol=1e-12)
-
-    def test_zero_eps_excludes_the_floor(self, ingredients):
-        """At a node with eps = 0 the delta is exactly zero: the floor is not
-        re-emitted (star_rate already carries it)."""
-        out = TabulatedSpeckleField(**ingredients).realize(
-            wavelength_nm=500.0, time_s=0.0
-        )
-        np.testing.assert_allclose(np.asarray(out), 0.0, atol=1e-30)
-
-    def test_coherent_adds_the_pinning_cross_term(self, ingredients):
-        out = TabulatedSpeckleField(**ingredients, coherent=True).realize(
-            wavelength_nm=500.0, time_s=10.0
-        )
-        g, e_nom = ingredients["G"], ingredients["e_nom"]
-        g_eps = jnp.tensordot(jnp.asarray([1.0, -1.0]), g, axes=1)
-        expected = np.asarray((jnp.abs(e_nom + g_eps) ** 2 - jnp.abs(e_nom) ** 2) / 3.0)
-        np.testing.assert_allclose(np.asarray(out), expected, rtol=1e-10)
-
-    def test_is_differentiable_in_time(self, ingredients):
-        field = TabulatedSpeckleField(**ingredients)
-
-        def total(t):
-            return jnp.sum(field.realize(wavelength_nm=500.0, time_s=t))
-
-        assert jnp.isfinite(jax.grad(total)(7.0))
 
 
 def _synthetic_lin(seed=2, m=2, ny=3, nx=3):
@@ -121,6 +68,10 @@ class TestCorrelatedDriftField:
             frequencies_hz=freqs,
             psd=psd,
             input_energy=_e_in(1.0),
+            grid=PixelGrid.regular(
+                e_nom.shape, 0.25, "lod", frame=Frame(500.0, 1.0, "circumscribed")
+            ),
+            reference_wavelength_nm=500.0,
         )
         from physicaloptix import AnalyticSpeckleField
 
@@ -145,6 +96,8 @@ class TestCorrelatedDriftField:
             frequencies_hz=freqs,
             psd=psd,
             input_energy=_e_in(1.0),
+            grid=PixelGrid.focal(3, 0.25, Frame(500.0, 1.0, "circumscribed")),
+            reference_wavelength_nm=500.0,
         )
         first = correlated_drift_field(*args, **kw)
         second = correlated_drift_field(*args, **kw)
@@ -177,6 +130,10 @@ class TestCorrelatedDriftField:
                 frequencies_hz=jnp.linspace(1e-4, 1e-2, 8),
                 psd=psd,
                 input_energy=_e_in(1.0),
+                grid=PixelGrid.regular(
+                    e_nom.shape, 0.25, "lod", frame=Frame(500.0, 1.0, "circumscribed")
+                ),
+                reference_wavelength_nm=500.0,
             )
 
     def test_rejects_indefinite_covariance(self):
@@ -191,6 +148,10 @@ class TestCorrelatedDriftField:
                 frequencies_hz=jnp.linspace(1e-4, 1e-2, 8),
                 psd=jnp.ones(8),
                 input_energy=_e_in(1.0),
+                grid=PixelGrid.regular(
+                    e_nom.shape, 0.25, "lod", frame=Frame(500.0, 1.0, "circumscribed")
+                ),
+                reference_wavelength_nm=500.0,
             )
 
     def test_rejects_asymmetric_covariance(self):
@@ -205,6 +166,10 @@ class TestCorrelatedDriftField:
                 frequencies_hz=jnp.linspace(1e-4, 1e-2, 8),
                 psd=jnp.ones(8),
                 input_energy=_e_in(1.0),
+                grid=PixelGrid.regular(
+                    e_nom.shape, 0.25, "lod", frame=Frame(500.0, 1.0, "circumscribed")
+                ),
+                reference_wavelength_nm=500.0,
             )
 
     def test_warns_when_neff_is_low(self):
@@ -222,6 +187,10 @@ class TestCorrelatedDriftField:
                 frequencies_hz=jnp.linspace(1e-4, 1e-2, 8),
                 psd=red,
                 input_energy=_e_in(1.0),
+                grid=PixelGrid.regular(
+                    e_nom.shape, 0.25, "lod", frame=Frame(500.0, 1.0, "circumscribed")
+                ),
+                reference_wavelength_nm=500.0,
             )
 
 
@@ -258,8 +227,14 @@ class TestPsdIsADensity:
                 psd=psd,
                 input_energy=_e_in(1.0),
                 df_weighted=df_weighted,
+                grid=PixelGrid.regular(
+                    e_nom.shape, 0.25, "lod", frame=Frame(500.0, 1.0, "circumscribed")
+                ),
+                reference_wavelength_nm=500.0,
             )
-            return jnp.stack([field._eps(float(t))[0] for t in [0.0, *lags]])
+            return jnp.stack(
+                [field.coefficients((float(t)) * s2d)[0] for t in [0.0, *lags]]
+            )
 
         keys = jax.random.split(jax.random.PRNGKey(11), n)
         eps = np.asarray(jax.vmap(eps_at)(keys))  # (n, 1 + n_lags)
@@ -309,6 +284,10 @@ class TestPsdIsADensity:
                 frequencies_hz=jnp.linspace(1e-4, 1e-2, 8),
                 psd=jnp.ones(7),
                 input_energy=_e_in(1.0),
+                grid=PixelGrid.regular(
+                    e_nom.shape, 0.25, "lod", frame=Frame(500.0, 1.0, "circumscribed")
+                ),
+                reference_wavelength_nm=500.0,
             )
 
 
@@ -339,9 +318,19 @@ class TestGroupedDriftField:
 
         def eps_at(key):
             field = grouped_drift_field(
-                e_nom, g, groups, key=key, input_energy=_e_in(1.0)
+                e_nom,
+                g,
+                groups,
+                key=key,
+                input_energy=_e_in(1.0),
+                grid=PixelGrid.regular(
+                    e_nom.shape, 0.25, "lod", frame=Frame(500.0, 1.0, "circumscribed")
+                ),
+                reference_wavelength_nm=500.0,
             )
-            return jnp.stack([field._eps(0.0), field._eps(lag)])
+            return jnp.stack(
+                [field.coefficients((0.0) * s2d), field.coefficients((lag) * s2d)]
+            )
 
         keys = jax.random.split(jax.random.PRNGKey(5), 3000)
         eps = np.asarray(jax.vmap(eps_at)(keys))  # (n, 2, m)
@@ -352,7 +341,15 @@ class TestGroupedDriftField:
     def test_per_block_grids_produce_a_two_dimensional_frequency_axis(self):
         e_nom, g = _synthetic_lin(m=2)
         field = grouped_drift_field(
-            e_nom, g, self._blocks(), key=jax.random.PRNGKey(0), input_energy=_e_in(1.0)
+            e_nom,
+            g,
+            self._blocks(),
+            key=jax.random.PRNGKey(0),
+            input_energy=_e_in(1.0),
+            grid=PixelGrid.regular(
+                e_nom.shape, 0.25, "lod", frame=Frame(500.0, 1.0, "circumscribed")
+            ),
+            reference_wavelength_nm=500.0,
         )
         assert field.frequencies_hz.shape == (2, 48)
         assert field.amplitudes.shape == (2, 48)
@@ -368,7 +365,15 @@ class TestGroupedDriftField:
             (jnp.asarray([[1.0]]), freqs, psd),
         ]
         field = grouped_drift_field(
-            e_nom, g, groups, key=jax.random.PRNGKey(0), input_energy=_e_in(1.0)
+            e_nom,
+            g,
+            groups,
+            key=jax.random.PRNGKey(0),
+            input_energy=_e_in(1.0),
+            grid=PixelGrid.regular(
+                e_nom.shape, 0.25, "lod", frame=Frame(500.0, 1.0, "circumscribed")
+            ),
+            reference_wavelength_nm=500.0,
         )
         assert field.frequencies_hz.shape == (48,)
 
@@ -380,9 +385,17 @@ class TestGroupedDriftField:
 
         def eps0(key):
             field = grouped_drift_field(
-                e_nom, g, [(cov, freqs, psd)], key=key, input_energy=_e_in(1.0)
+                e_nom,
+                g,
+                [(cov, freqs, psd)],
+                key=key,
+                input_energy=_e_in(1.0),
+                grid=PixelGrid.regular(
+                    e_nom.shape, 0.25, "lod", frame=Frame(500.0, 1.0, "circumscribed")
+                ),
+                reference_wavelength_nm=500.0,
             )
-            return field._eps(0.0)
+            return field.coefficients((0.0) * s2d)
 
         keys = jax.random.split(jax.random.PRNGKey(9), 8000)
         samples = np.asarray(jax.vmap(eps0)(keys))
@@ -398,6 +411,10 @@ class TestGroupedDriftField:
                 [(jnp.asarray([[1.0]]), freqs, psd)],
                 key=jax.random.PRNGKey(0),
                 input_energy=_e_in(1.0),
+                grid=PixelGrid.regular(
+                    e_nom.shape, 0.25, "lod", frame=Frame(500.0, 1.0, "circumscribed")
+                ),
+                reference_wavelength_nm=500.0,
             )
 
     def test_frequency_counts_must_agree(self):
@@ -412,13 +429,25 @@ class TestGroupedDriftField:
                 ],
                 key=jax.random.PRNGKey(0),
                 input_energy=_e_in(1.0),
+                grid=PixelGrid.regular(
+                    e_nom.shape, 0.25, "lod", frame=Frame(500.0, 1.0, "circumscribed")
+                ),
+                reference_wavelength_nm=500.0,
             )
 
     def test_empty_groups_are_rejected(self):
         e_nom, g = _synthetic_lin(m=2)
         with pytest.raises(ValueError, match="at least one"):
             grouped_drift_field(
-                e_nom, g, [], key=jax.random.PRNGKey(0), input_energy=_e_in(1.0)
+                e_nom,
+                g,
+                [],
+                key=jax.random.PRNGKey(0),
+                input_energy=_e_in(1.0),
+                grid=PixelGrid.regular(
+                    e_nom.shape, 0.25, "lod", frame=Frame(500.0, 1.0, "circumscribed")
+                ),
+                reference_wavelength_nm=500.0,
             )
 
 
@@ -429,7 +458,6 @@ class TestPhysicaloptixIntegration:
         from physicaloptix import (
             Field,
             Fraunhofer,
-            Grid,
             OpticalPath,
             PlaneKind,
             Stage,
@@ -437,14 +465,19 @@ class TestPhysicaloptixIntegration:
             zernike_basis,
         )
 
-        pupil = Grid.pupil(48)
-        coords = np.asarray(pupil.coords)
-        xx, yy = np.meshgrid(coords, coords)
+        pupil = PixelGrid.pupil(48)
+        xx, yy = map(np.asarray, pupil.coordinates())
         aperture = (xx**2 + yy**2 <= 0.25).astype(float)
         path = OpticalPath(
             stages=(
                 Stage(
-                    "science", Fraunhofer(grid_in=pupil, grid_out=Grid.focal(32, 0.5))
+                    "science",
+                    Fraunhofer(
+                        grid_in=pupil,
+                        grid_out=PixelGrid.focal(
+                            32, 0.5, Frame(500.0, 1.0, "circumscribed")
+                        ),
+                    ),
                 ),
             )
         )
@@ -467,53 +500,76 @@ class TestPhysicaloptixIntegration:
             times,
             eps_table,
             input_energy=lin.input_energy,
+            grid=lin.grid,
+            reference_wavelength_nm=500.0,
         )
-        out = speckle.realize(wavelength_nm=500.0, time_s=50.0)
+        out = speckle.realize(wavelength_nm=500.0, time_d=(50.0) * s2d).data
         assert out.shape == (32, 32)
         assert jnp.all(jnp.isfinite(out))
-        at_zero = speckle.realize(wavelength_nm=500.0, time_s=0.0)
+        at_zero = speckle.realize(wavelength_nm=500.0, time_d=(0.0) * s2d).data
         np.testing.assert_allclose(np.asarray(at_zero), 0.0, atol=1e-30)
 
 
-class TestChromaticTabulatedField:
-    """The wavelength-channel axis on the replayed trajectory."""
+def test_shared_law_matches_density_parent_formula(ingredients):
+    """Parent coherent density law; bound is 32 binary64 eps of peak."""
+    from optixstuff.speckle import LinearSpeckleField
 
-    def test_broadened_halo_scales_inverse_square(self, ingredients):
-        mono = TabulatedSpeckleField(**ingredients)
-        chrom = mono.broadened(
-            reference_wavelength_nm=900.0, wavelengths_nm=[450.0, 900.0]
-        )
-        blue = chrom.realize(wavelength_nm=450.0, time_s=10.0)
-        ref = chrom.realize(wavelength_nm=900.0, time_s=10.0)
-        np.testing.assert_allclose(np.asarray(blue), 4.0 * np.asarray(ref), rtol=1e-12)
+    field = TabulatedSpeckleField(**ingredients)
+    assert isinstance(field, LinearSpeckleField)
+    assert type(field).realize is LinearSpeckleField.realize
+    assert type(field).broadened is LinearSpeckleField.broadened
+    eps = np.array([0.7, -0.7])
+    de = np.einsum("m,myx->yx", eps, ingredients["G"])
+    nominal = np.asarray(ingredients["e_nom"])
+    parent = 2 * np.real(nominal.conj() * de) + abs(de) ** 2
+    parent *= ingredients["grid"].pixel_area / ingredients["input_energy"]
+    image = field.realize(wavelength_nm=500.0, time_d=7.0 * s2d)
+    np.testing.assert_allclose(
+        image.data, parent, rtol=0, atol=32 * np.finfo(float).eps * np.max(abs(parent))
+    )
+    assert image.grid == field.grid
+    assert (image.measure, image.quantity) == ("per_pixel", "stellar_flux_fraction")
 
-    def test_reference_channel_matches_mono(self, ingredients):
-        mono = TabulatedSpeckleField(**ingredients)
-        chrom = mono.broadened(
-            reference_wavelength_nm=900.0, wavelengths_nm=[450.0, 900.0]
-        )
-        a = mono.realize(wavelength_nm=900.0, time_s=15.0)
-        b = chrom.realize(wavelength_nm=900.0, time_s=15.0)
-        np.testing.assert_allclose(np.asarray(a), np.asarray(b), rtol=1e-12)
 
-    def test_trajectory_shared_across_channels(self, ingredients):
-        chrom = TabulatedSpeckleField(**ingredients).broadened(
-            reference_wavelength_nm=900.0, wavelengths_nm=[450.0, 900.0]
-        )
-        np.testing.assert_allclose(
-            np.asarray(chrom.eps(10.0)), np.asarray([1.0, -1.0]), rtol=1e-12
-        )
+def test_tabulated_clock_origin_and_seconds(ingredients):
+    """Clock error bound: eight absolute-day ulps times the table slope."""
+    from hwoutils.constants import d2s
 
-    def test_chromatic_mode_axis_validated(self, ingredients):
-        chrom = TabulatedSpeckleField(**ingredients).broadened(
-            reference_wavelength_nm=900.0, wavelengths_nm=[450.0, 900.0]
-        )
-        with pytest.raises(ValueError, match="modes"):
-            TabulatedSpeckleField(
-                chrom.e_nom,
-                chrom.G[:, :1],  # drop a mode: mismatch with eps_table
-                ingredients["times_s"],
-                ingredients["eps_table"],
-                input_energy=_e_in(1.0),
-                wavelengths_nm=[450.0, 900.0],
-            )
+    epoch = 100.0
+    field = TabulatedSpeckleField(**ingredients, epoch_d=epoch)
+    elapsed = np.array([-1.0, 0.0, 5.0, 10.0, 15.0, 21.0])
+    expected = np.column_stack(
+        [
+            np.interp(elapsed, ingredients["times_s"], col)
+            for col in np.asarray(ingredients["eps_table"]).T
+        ]
+    )
+    bound = 8 * np.spacing(epoch) * d2s * 0.15
+    np.testing.assert_allclose(
+        field.coefficients(epoch + elapsed * s2d), expected, rtol=0, atol=bound
+    )
+    np.testing.assert_array_equal(field.coefficients(epoch), [0.0, 0.0])
+    # Between nodes the exact derivative is the tabulated slope, per day.
+    derivative = jax.jacfwd(field.coefficients)(epoch + 5.0 * s2d)
+    np.testing.assert_allclose(
+        derivative, np.array([0.1, -0.1]) * d2s, rtol=8 * np.finfo(float).eps
+    )
+
+
+def test_density_normalization_number_is_unchanged():
+    """Density e=2, G=3, eps=.5 gives (6+2.25)*.04/5 = .066."""
+    grid = PixelGrid.regular(
+        (1, 1), 0.2, "lod", frame=Frame(500.0, 1.0, "circumscribed")
+    )
+    field = TabulatedSpeckleField(
+        jnp.array([[2.0 + 0j]]),
+        jnp.array([[[3.0 + 0j]]]),
+        jnp.array([0.0, 10.0]),
+        jnp.array([[0.0], [1.0]]),
+        input_energy=5.0,
+        grid=grid,
+        reference_wavelength_nm=500.0,
+    )
+    assert float(
+        field.realize(wavelength_nm=500.0, time_d=5.0 * s2d).data[0, 0]
+    ) == pytest.approx(0.066, rel=8 * np.finfo(float).eps)
