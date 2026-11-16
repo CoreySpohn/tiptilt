@@ -27,7 +27,7 @@ from physicaloptix import PhaseScreen, read_detector
 
 from tiptilt.control import DarkZoneModel, EFCController
 from tiptilt.sensing import KalmanEstimator, OracleEstimator, PairwiseEstimator
-from tiptilt.speckle import J2000_JD, TabulatedSpeckleField
+from tiptilt.speckle import TabulatedSpeckleField
 
 
 def make_detector(
@@ -248,7 +248,7 @@ def maintained_residual_field(
     gain,
     regularization,
     pixel_scale_lod=0.25,
-    epoch_jd=J2000_JD,
+    epoch_d=0.0,
     coherent=True,
     **maintain_kwargs,
 ):
@@ -287,7 +287,7 @@ def maintained_residual_field(
         gain: Loop gain (0 = the open-loop reference field).
         regularization: Tikhonov term of the default EFC controller.
         pixel_scale_lod: Native focal pixel scale in lambda/D per pixel.
-        epoch_jd: Julian Date mapping to ``time_s = 0``.
+        epoch_d: Days from the scene epoch mapping to ``time_s = 0``. Default 0.0.
         coherent: Include the pinning cross term (default True).
         **maintain_kwargs: Forwarded to :func:`maintain_dark_hole`
             (``command0``, ``estimator``, ``probes``, ``detector``, ...).
@@ -350,7 +350,7 @@ def maintained_residual_field(
         eps_table,
         input_energy=float(input_field.energy()),
         pixel_scale_lod=pixel_scale_lod,
-        epoch_jd=epoch_jd,
+        epoch_d=epoch_d,
         coherent=coherent,
     )
     return field, history

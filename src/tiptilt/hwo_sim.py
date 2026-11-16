@@ -201,7 +201,7 @@ class HwoSimSpeckleField(AbstractSpeckleField):
     wavelengths.
 
     Exactly one drift form must be supplied (see the module docstring). Set
-    ``epoch_jd`` near the observations being simulated. JAX defaults to
+    ``epoch_d`` near the observations being simulated. JAX defaults to
     float32, in which the sinusoid phase ``2 pi f t`` loses absolute precision
     as the elapsed time grows, so a clock origin left thousands of days away
     quietly corrupts the drift. The tabulated form has the same exposure
@@ -210,7 +210,7 @@ class HwoSimSpeckleField(AbstractSpeckleField):
     """
 
     pixel_scale_lod: float
-    epoch_jd: float
+    epoch_d: float
     wavelengths_nm: Array
     e_nom: Array  # complex (num_wl, num_pix): nominal field on the pixel list
     gain: Array  # complex (num_wl, num_pix, num_mode): d(E)/d(mode), flat modes
@@ -231,7 +231,7 @@ class HwoSimSpeckleField(AbstractSpeckleField):
         *,
         wavelengths_nm: ArrayLike,
         pixel_scale_lod: float,
-        epoch_jd: float,
+        epoch_d: float = 0.0,
         contrast_to_flux_fraction: float,
         amplitude: Array | None = None,
         frequency_hz: Array | None = None,
@@ -253,7 +253,7 @@ class HwoSimSpeckleField(AbstractSpeckleField):
                 pixel axis of ``e_nom`` and ``G``.
             wavelengths_nm: Wavelength of each plane, (num_wl,).
             pixel_scale_lod: Plate scale in lambda/D per pixel.
-            epoch_jd: Julian Date mapping to ``time_s = 0``.
+            epoch_d: Days from the scene epoch mapping to ``time_s = 0``. Default 0.0.
             contrast_to_flux_fraction: Scale from peak-referenced contrast to
                 flux fraction per pixel.
             amplitude: Sinusoid drift amplitudes, (num_seg, num_zern,
@@ -261,7 +261,7 @@ class HwoSimSpeckleField(AbstractSpeckleField):
             frequency_hz: Sinusoid drift frequencies, same shape.
             phase: Sinusoid drift phases, same shape.
             drift_time_s: Abscissa of a tabulated drift, (T,) seconds since
-                ``epoch_jd``, strictly increasing.
+                ``epoch_d``, strictly increasing.
             drift_coefficients: Tabulated drift, (T, num_seg, num_zern), nm
                 RMS wavefront error.
         """
@@ -269,7 +269,7 @@ class HwoSimSpeckleField(AbstractSpeckleField):
         num_wl, num_pix = np.shape(e_nom)
 
         self.pixel_scale_lod = float(pixel_scale_lod)
-        self.epoch_jd = float(epoch_jd)
+        self.epoch_d = float(epoch_d)
         self.wavelengths_nm = jnp.asarray(wavelengths_nm, dtype=float)
         self.e_nom = jnp.asarray(e_nom)
         # Flat modes, so the drift contracts as a single matrix-vector product
@@ -404,7 +404,7 @@ class HwoSimSpeckleField(AbstractSpeckleField):
     def with_drift(
         self,
         *,
-        epoch_jd: float | None = None,
+        epoch_d: float | None = None,
         amplitude: Array | None = None,
         frequency_hz: Array | None = None,
         phase: Array | None = None,
@@ -418,7 +418,7 @@ class HwoSimSpeckleField(AbstractSpeckleField):
         correlation time.
 
         Args:
-            epoch_jd: New clock origin. None keeps the current one.
+            epoch_d: New clock origin. None keeps the current one.
             amplitude: New drift amplitudes. None keeps the current ones.
             frequency_hz: New drift frequencies. None keeps the current ones.
             phase: New drift phases. None keeps the current ones.
@@ -437,7 +437,7 @@ class HwoSimSpeckleField(AbstractSpeckleField):
                 "to point it at a different window or series."
             )
         updates = {
-            "epoch_jd": float(self.epoch_jd if epoch_jd is None else epoch_jd),
+            "epoch_d": float(self.epoch_d if epoch_d is None else epoch_d),
             "amplitude": self.amplitude
             if amplitude is None
             else jnp.asarray(amplitude),
@@ -447,17 +447,17 @@ class HwoSimSpeckleField(AbstractSpeckleField):
             "phase": self.phase if phase is None else jnp.asarray(phase),
         }
         return eqx.tree_at(
-            lambda s: (s.epoch_jd, s.amplitude, s.frequency_hz, s.phase),
+            lambda s: (s.epoch_d, s.amplitude, s.frequency_hz, s.phase),
             self,
             tuple(
-                updates[k] for k in ("epoch_jd", "amplitude", "frequency_hz", "phase")
+                updates[k] for k in ("epoch_d", "amplitude", "frequency_hz", "phase")
             ),
         )
 
     def with_tabulated_drift(
         self,
         *,
-        epoch_jd: float | None = None,
+        epoch_d: float | None = None,
         drift_time_s: Array | None = None,
         drift_coefficients: Array | None = None,
     ) -> "HwoSimSpeckleField":
@@ -466,11 +466,11 @@ class HwoSimSpeckleField(AbstractSpeckleField):
         The tabulated counterpart of :meth:`with_drift`. The use is not a
         fresh random realization but a different slice of history: another
         window of the same series, another control scenario, or another run.
-        Re-anchoring ``epoch_jd`` to the window being rendered is usually part
+        Re-anchoring ``epoch_d`` to the window being rendered is usually part
         of that, since the abscissa is seconds from the clock origin.
 
         Args:
-            epoch_jd: New clock origin. None keeps the current one.
+            epoch_d: New clock origin. None keeps the current one.
             drift_time_s: New abscissa, (T,). None keeps the current one.
             drift_coefficients: New series, (T, num_seg, num_zern). None keeps
                 the current one.
@@ -503,9 +503,9 @@ class HwoSimSpeckleField(AbstractSpeckleField):
                 f"drift_coefficients has {c_new.shape[0]}"
             )
         return eqx.tree_at(
-            lambda s: (s.epoch_jd, s.drift_time_s, s.drift_coefficients),
+            lambda s: (s.epoch_d, s.drift_time_s, s.drift_coefficients),
             self,
-            (float(self.epoch_jd if epoch_jd is None else epoch_jd), t_new, c_new),
+            (float(self.epoch_d if epoch_d is None else epoch_d), t_new, c_new),
         )
 
     def max_safe_elapsed_s(
@@ -516,7 +516,7 @@ class HwoSimSpeckleField(AbstractSpeckleField):
         The sinusoid argument is ``2 pi f t``. In float32 its absolute error
         grows with magnitude, at a relative resolution of ``2 ** -24``, so the
         phase error for the fastest mode is ``2 pi f t * 2 ** -24``. Solving
-        for the tolerance gives the returned bound. Anchor ``epoch_jd`` inside
+        for the tolerance gives the returned bound. Anchor ``epoch_d`` inside
         it, or enable ``jax_enable_x64``.
 
         A tabulated drift has the same exposure through a different quantity.

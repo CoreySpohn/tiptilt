@@ -49,8 +49,6 @@ from optixstuff.speckle import AbstractSpeckleField
 from physicaloptix import AnalyticSpeckleField, lambda_scaled_channels
 from physicaloptix.speckle import _check_chromatic_layout, _select_channel
 
-J2000_JD = 2451545.0
-
 # Below this effective frequency count a single frozen realization's modal
 # covariance is an unreliable sample of the target (scatter ~ 1/sqrt(N_eff)).
 _NEFF_WARN = 8.0
@@ -227,7 +225,7 @@ def correlated_drift_field(
     psd,
     input_energy,
     pixel_scale_lod=0.25,
-    epoch_jd=J2000_JD,
+    epoch_d=0.0,
     coherent=False,
     df_weighted=True,
 ):
@@ -269,7 +267,7 @@ def correlated_drift_field(
             (``field.energy()``); the flux-fraction normalization
             ``input_energy / pixel_scale_lod**2`` is derived at construction.
         pixel_scale_lod: Native pixel scale in lambda/D per pixel.
-        epoch_jd: Julian Date mapping to ``time_s = 0``. Default J2000.
+        epoch_d: Days from the scene epoch mapping to ``time_s = 0``. Default 0.0.
         coherent: Include the pinning cross term. Default ``False``.
         df_weighted: Treat ``psd`` as a density and give line ``j`` the power
             ``psd[j] df_j`` (trapezoid widths of ``frequencies_hz``), so the
@@ -309,7 +307,7 @@ def correlated_drift_field(
         phases,
         input_energy=input_energy,
         pixel_scale_lod=pixel_scale_lod,
-        epoch_jd=epoch_jd,
+        epoch_d=epoch_d,
         coherent=coherent,
     )
 
@@ -322,7 +320,7 @@ def grouped_drift_field(
     key,
     input_energy,
     pixel_scale_lod=0.25,
-    epoch_jd=J2000_JD,
+    epoch_d=0.0,
     coherent=False,
     df_weighted=True,
 ):
@@ -355,7 +353,7 @@ def grouped_drift_field(
             train at the pre-coronagraph reference plane
             (``field.energy()``); see :func:`correlated_drift_field`.
         pixel_scale_lod: Native pixel scale in lambda/D per pixel.
-        epoch_jd: Julian Date mapping to ``time_s = 0``. Default J2000.
+        epoch_d: Days from the scene epoch mapping to ``time_s = 0``. Default 0.0.
         coherent: Include the pinning cross term. Default ``False``.
         df_weighted: Treat each PSD as a density (see
             :func:`correlated_drift_field`). Default ``True``.
@@ -412,7 +410,7 @@ def grouped_drift_field(
         phases,
         input_energy=input_energy,
         pixel_scale_lod=pixel_scale_lod,
-        epoch_jd=epoch_jd,
+        epoch_d=epoch_d,
         coherent=coherent,
     )
 
@@ -425,7 +423,7 @@ def correlated_channel_fields(
     frequencies_hz,
     psd,
     local=None,
-    epoch_jd=J2000_JD,
+    epoch_d=0.0,
     coherent=True,
     df_weighted=True,
 ):
@@ -458,7 +456,7 @@ def correlated_channel_fields(
         local: Optional dict mapping a channel name to ``(g_local,
             covariance_local_nm2)`` -- that channel's independent
             non-common-path block.
-        epoch_jd: Julian Date mapping to ``time_s = 0``.
+        epoch_d: Days from the scene epoch mapping to ``time_s = 0``. Default 0.0.
         coherent: Include the pinning cross term. Default ``True``.
         df_weighted: Treat ``psd`` as a density (see
             :func:`correlated_drift_field`). Default ``True``.
@@ -499,7 +497,7 @@ def correlated_channel_fields(
             phases,
             input_energy=mcl.input_energy,
             pixel_scale_lod=channel.pixel_scale_lod,
-            epoch_jd=epoch_jd,
+            epoch_d=epoch_d,
             coherent=coherent,
         )
     return fields
@@ -538,7 +536,7 @@ class TabulatedSpeckleField(AbstractSpeckleField):
     input_energy: Array
     normalization: Array
     pixel_scale_lod: float
-    epoch_jd: float
+    epoch_d: float
     wavelengths_nm: Array | None
     coherent: bool = eqx.field(static=True)
 
@@ -551,7 +549,7 @@ class TabulatedSpeckleField(AbstractSpeckleField):
         *,
         input_energy,
         pixel_scale_lod=0.25,
-        epoch_jd=J2000_JD,
+        epoch_d=0.0,
         coherent=False,
         wavelengths_nm=None,
     ):
@@ -571,7 +569,7 @@ class TabulatedSpeckleField(AbstractSpeckleField):
                 a chromatic field.
             pixel_scale_lod: Native pixel scale in lambda/D per pixel
                 (shared by every channel: the maps live in lambda/D units).
-            epoch_jd: Julian Date mapping to ``time_s = 0``. Default J2000.
+            epoch_d: Days from the scene epoch mapping to ``time_s = 0``. Default 0.0.
             coherent: Include the pinning cross term. Default ``False``.
             wavelengths_nm: Channel wavelengths, shape ``(w,)``, enabling
                 the chromatic layout above. ``None`` (default) for a
@@ -587,7 +585,7 @@ class TabulatedSpeckleField(AbstractSpeckleField):
         # physicaloptix AnalyticSpeckleField); tree_at on input_energy does
         # not re-derive it.
         self.normalization = self.input_energy / pixel_scale_lod**2
-        self.epoch_jd = epoch_jd
+        self.epoch_d = epoch_d
         self.wavelengths_nm = (
             None if wavelengths_nm is None else jnp.asarray(wavelengths_nm, dtype=float)
         )
@@ -676,7 +674,7 @@ class TabulatedSpeckleField(AbstractSpeckleField):
             self.eps_table,
             input_energy=self.input_energy,
             pixel_scale_lod=self.pixel_scale_lod,
-            epoch_jd=self.epoch_jd,
+            epoch_d=self.epoch_d,
             coherent=self.coherent,
             wavelengths_nm=wavelengths_nm,
         )

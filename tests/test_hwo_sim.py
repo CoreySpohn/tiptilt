@@ -45,7 +45,7 @@ def _field(delivery, **drift):
         delivery["dark_zone"],
         wavelengths_nm=delivery["wavelengths_nm"],
         pixel_scale_lod=delivery["pixel_scale_lod"],
-        epoch_jd=2460000.0,
+        epoch_d=0.0,
         contrast_to_flux_fraction=SCALE,
         **drift,
     )
@@ -207,15 +207,15 @@ class TestHwoSimSpeckleField:
 
     def test_with_drift_swaps_only_the_drift(self, delivery):
         field = _field(delivery, **_sinusoid())
-        swapped = field.with_drift(amplitude=2.0 * field.amplitude, epoch_jd=1.0)
-        assert swapped.epoch_jd == 1.0
+        swapped = field.with_drift(amplitude=2.0 * field.amplitude, epoch_d=1.0)
+        assert swapped.epoch_d == 1.0
         assert swapped.gain is field.gain
         np.testing.assert_allclose(
             np.asarray(swapped.coefficients(10.0)),
             2.0 * np.asarray(field.coefficients(10.0)),
         )
         with pytest.raises(ValueError, match="tabulated"):
-            _field(delivery, **_tabulated()).with_drift(epoch_jd=1.0)
+            _field(delivery, **_tabulated()).with_drift(epoch_d=1.0)
 
     def test_with_tabulated_drift_swaps_the_series(self, delivery):
         field = _field(delivery, **_tabulated())
@@ -228,7 +228,7 @@ class TestHwoSimSpeckleField:
         with pytest.raises(ValueError, match="samples"):
             field.with_tabulated_drift(drift_coefficients=table[:2])
         with pytest.raises(ValueError, match="sinusoid"):
-            _field(delivery, **_sinusoid()).with_tabulated_drift(epoch_jd=1.0)
+            _field(delivery, **_sinusoid()).with_tabulated_drift(epoch_d=1.0)
 
     def test_max_safe_elapsed_follows_float32_resolution(self, delivery):
         eps32 = float(np.finfo(np.float32).eps)
