@@ -1,5 +1,16 @@
 # Changelog
 
+## [1.0.0](https://github.com/CoreySpohn/tiptilt/compare/v0.3.0...v1.0.0) (2026-11-16)
+
+
+### ⚠ BREAKING CHANGES
+
+* **speckle:** the speckle clock origin is days from the scene epoch
+
+### Features
+
+* **speckle:** the speckle clock origin is days from the scene epoch ([9877d50](https://github.com/CoreySpohn/tiptilt/commit/9877d5065108283ad92649a110e2308fe8bf4265))
+
 ## [0.3.0](https://github.com/CoreySpohn/tiptilt/compare/v0.2.0...v0.3.0) (2026-11-05)
 
 
