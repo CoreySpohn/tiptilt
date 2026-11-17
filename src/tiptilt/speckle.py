@@ -56,7 +56,7 @@ from physicaloptix import AnalyticSpeckleField
 _NEFF_WARN = 8.0
 
 
-def _line_powers(frequencies_hz, psd, df_weighted):
+def _line_powers(frequencies_hz, psd):
     """Per-line temporal power from a PSD sampled on a frequency grid.
 
     ``psd`` is a power spectral DENSITY, so the power carried by line ``j`` is
@@ -69,8 +69,6 @@ def _line_powers(frequencies_hz, psd, df_weighted):
     Args:
         frequencies_hz: Frequency grid, shape ``(f,)``, increasing.
         psd: Density sampled on that grid, shape ``(f,)``.
-        df_weighted: Apply the trapezoid widths. ``False`` reproduces the
-            pre-2026-07-25 behavior.
 
     Returns:
         The unnormalized per-line powers, a numpy array of shape ``(f,)``.
@@ -84,7 +82,7 @@ def _line_powers(frequencies_hz, psd, df_weighted):
         raise ValueError(
             f"frequencies_hz {f.shape} and psd {power.shape} must have the same shape"
         )
-    if df_weighted and f.size > 1:
+    if f.size > 1:
         half = 0.5 * np.diff(f)
         df = np.concatenate([[half[0]], half[1:] + half[:-1], [half[-1]]])
         power = power * df
@@ -229,7 +227,6 @@ def correlated_drift_field(
     grid,
     reference_wavelength_nm,
     epoch_d=0.0,
-    df_weighted=True,
 ):
     """Build a stationary speckle field with a target cross-mode covariance.
 
@@ -245,7 +242,7 @@ def correlated_drift_field(
     time-averaged modal covariance is an unbiased but random sample of
     ``covariance_nm2`` with relative scatter ``~ 1/sqrt(N_eff)``, where
     ``N_eff = (sum w)^2 / sum(w^2)`` is the participation ratio of the per-line
-    powers ``w`` (``psd * df`` under ``df_weighted``) -- set by the PSD SHAPE
+    powers ``w = psd * df`` -- set by the PSD SHAPE
     and the grid, not by the number of frequencies alone. A finite
     cosine sum is also almost-periodic: its lag covariance revives on ``~1/df``.
     So this is the right tool for broadband, whitish stationary drift (large
@@ -270,11 +267,6 @@ def correlated_drift_field(
         grid: Native focal PixelGrid with its provenance Frame.
         reference_wavelength_nm: Wavelength of the supplied density amplitudes.
         epoch_d: Days from the scene epoch mapping to ``time_s = 0``. Default 0.0.
-        df_weighted: Treat ``psd`` as a density and give line ``j`` the power
-            ``psd[j] df_j`` (trapezoid widths of ``frequencies_hz``), so the
-            realized temporal kernel is the PSD's transform. Default ``True``;
-            a uniform grid is unaffected either way. Pass ``False`` to
-            reproduce ensembles drawn before 2026-07-25.
 
     Returns:
         A physicaloptix ``AnalyticSpeckleField``.
@@ -285,7 +277,7 @@ def correlated_drift_field(
     """
     _check_covariance(covariance_nm2)
 
-    power = _line_powers(frequencies_hz, psd, df_weighted)
+    power = _line_powers(frequencies_hz, psd)
     total = float(power.sum())
     n_eff = total**2 / float((power**2).sum())
     if n_eff < _NEFF_WARN:
@@ -323,7 +315,6 @@ def grouped_drift_field(
     grid,
     reference_wavelength_nm,
     epoch_d=0.0,
-    df_weighted=True,
 ):
     """Stationary field whose mode BLOCKS drift on different timescales.
 
@@ -356,8 +347,6 @@ def grouped_drift_field(
         grid: Native focal PixelGrid with its provenance Frame.
         reference_wavelength_nm: Wavelength of the supplied density amplitudes.
         epoch_d: Days from the scene epoch mapping to ``time_s = 0``. Default 0.0.
-        df_weighted: Treat each PSD as a density (see
-            :func:`correlated_drift_field`). Default ``True``.
 
     Returns:
         A physicaloptix ``AnalyticSpeckleField`` over all blocks' modes. Its
@@ -381,7 +370,7 @@ def grouped_drift_field(
                 f"{n_freq}; blocks stack into one (m, f) array so the counts "
                 "must agree (resample the grids, or build separate fields)"
             )
-        power = _line_powers(freqs, psd, df_weighted)
+        power = _line_powers(freqs, psd)
         weights = jnp.asarray(2.0 * power / float(power.sum()))
         amplitudes, phases = _draw_correlated_spectrum(
             covariance, jax.random.fold_in(key, i), weights
@@ -425,7 +414,6 @@ def correlated_channel_fields(
     psd,
     local=None,
     epoch_d=0.0,
-    df_weighted=True,
 ):
     """Correlated per-channel speckle fields from one shared-mode draw.
 
@@ -456,8 +444,6 @@ def correlated_channel_fields(
             covariance_local_nm2)`` -- that channel's independent
             non-common-path block.
         epoch_d: Days from the scene epoch mapping to ``time_s = 0``. Default 0.0.
-        df_weighted: Treat ``psd`` as a density (see
-            :func:`correlated_drift_field`). Default ``True``.
 
     Returns:
         A dict mapping each channel name to an ``AnalyticSpeckleField``.
@@ -466,7 +452,7 @@ def correlated_channel_fields(
         ValueError: If the shared covariance fails
             ``correlated_drift_field``'s validity checks.
     """
-    power = _line_powers(frequencies_hz, psd, df_weighted)
+    power = _line_powers(frequencies_hz, psd)
     weights = jnp.asarray(2.0 * power / float(power.sum()))
 
     key_shared, key_locals = jax.random.split(key)

@@ -213,7 +213,7 @@ class TestPsdIsADensity:
         f = np.logspace(lo, hi, n)
         return jnp.asarray(f), jnp.asarray(1.0 / (1.0 + (f / self.KNEE) ** 2))
 
-    def _measured_rho(self, freqs, psd, lags, *, df_weighted=True, n=4000):
+    def _measured_rho(self, freqs, psd, lags, *, n=4000):
         e_nom, g = _synthetic_lin(m=1)
         cov = jnp.asarray([[1.0]])
 
@@ -226,7 +226,6 @@ class TestPsdIsADensity:
                 frequencies_hz=freqs,
                 psd=psd,
                 input_energy=_e_in(1.0),
-                df_weighted=df_weighted,
                 grid=PixelGrid.regular(
                     e_nom.shape, 0.25, "lod", frame=Frame(500.0, 1.0, "circumscribed")
                 ),
@@ -250,9 +249,8 @@ class TestPsdIsADensity:
 
         freqs = np.linspace(1e-4, 1e-2, 16)
         psd = np.linspace(1.0, 0.1, 16)
-        with_df = _line_powers(freqs, psd, True)
-        without = _line_powers(freqs, psd, False)
-        ratio = with_df / without
+        with_df = _line_powers(freqs, psd)
+        ratio = with_df / psd
         np.testing.assert_allclose(ratio[1:-1], ratio[8], rtol=1e-12)
         for edge in (0, -1):
             assert np.isclose(ratio[edge], 0.5 * ratio[8], rtol=1e-12)
@@ -265,13 +263,6 @@ class TestPsdIsADensity:
         rho = self._measured_rho(freqs, psd, lags)
         target = np.exp(-np.array(lags) / self.TAU_C)
         np.testing.assert_allclose(rho, target, atol=0.04)
-
-    def test_bare_ordinate_weighting_is_far_too_slow(self):
-        """The pre-fix behavior, pinned: at one decorrelation time it retains
-        most of the correlation the Lorentzian has already lost."""
-        freqs, psd = self._log_grid(decades_below=0.7)
-        rho = self._measured_rho(freqs, psd, [self.TAU_C], df_weighted=False)[0]
-        assert rho > 1.5 * np.exp(-1.0)
 
     def test_mismatched_shapes_are_rejected(self):
         e_nom, g = _synthetic_lin()
