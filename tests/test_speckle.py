@@ -564,3 +564,20 @@ def test_density_normalization_number_is_unchanged():
     assert float(
         field.realize(wavelength_nm=500.0, time_d=5.0 * s2d).data[0, 0]
     ) == pytest.approx(0.066, rel=8 * np.finfo(float).eps)
+
+
+def test_line_powers_nonuniform_and_discrete_line():
+    """Affine PSD integrals agree to 2e-15 relative floating-point error.
+
+    For f=(1,2,5), endpoint half widths are (0.5,1.5), and the
+    interior half span is 2. The PSD 2*f+1 integrates to [f**2+f].
+    A singleton retains its declared discrete line power exactly.
+    """
+    from tiptilt.speckle import _line_powers
+
+    f = np.array([1.0, 2.0, 5.0])
+    expected = np.array([0.5, 2.0, 1.5]) * (2 * f + 1)
+    actual = _line_powers(f, 2 * f + 1)
+    np.testing.assert_allclose(actual, expected, rtol=2e-15, atol=0)
+    np.testing.assert_allclose(actual.sum(), (5**2 + 5) - (1**2 + 1), rtol=2e-15)
+    np.testing.assert_array_equal(_line_powers([2.0], [7.0]), [7.0])

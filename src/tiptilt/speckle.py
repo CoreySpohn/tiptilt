@@ -47,6 +47,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from hwoutils.constants import d2s
+from hwoutils.spectral import trapezoid_weights
 from jaxtyping import Array
 from optixstuff.speckle import LinearSpeckleField
 from physicaloptix import AnalyticSpeckleField
@@ -82,9 +83,9 @@ def _line_powers(frequencies_hz, psd):
         raise ValueError(
             f"frequencies_hz {f.shape} and psd {power.shape} must have the same shape"
         )
+    # A singleton is a discrete line power, not a finite-span PSD integral.
     if f.size > 1:
-        half = 0.5 * np.diff(f)
-        df = np.concatenate([[half[0]], half[1:] + half[:-1], [half[-1]]])
+        df = np.asarray(trapezoid_weights(f))
         power = power * df
     if float(power.sum()) <= 0.0:
         raise ValueError("psd must have positive total power")
