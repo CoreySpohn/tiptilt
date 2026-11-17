@@ -22,6 +22,7 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 import numpy as np
+from hwoutils.radial import get_center
 from jaxtyping import Array
 from physicaloptix import ModeBasis, PhaseScreen, PlaneKind
 
@@ -395,7 +396,8 @@ class ActuatorLattice(eqx.Module):
         npix = grid.shape[0]
         dx = grid.step
         sigma = pitch / np.sqrt(-np.log(coupling))
-        lattice = (np.arange(n_across) - (n_across - 1) / 2.0) * pitch
+        _, lattice_center_x = get_center((n_across, n_across))
+        lattice = (np.arange(n_across) - lattice_center_x) * pitch
         cx = lattice + center[0]
         cy = lattice + center[1]
         xc, yc = np.meshgrid(cx, cy)
@@ -406,7 +408,8 @@ class ActuatorLattice(eqx.Module):
         # ramp evaluates the inverse FFT on the half-pixel-offset coordinates
         # x_j = (j - npix/2 + 1/2) dx, and 1/dx^2 is the Riemann df^2 times the
         # npix^2 that ifft2 divides out.
-        offset = (0.5 - npix / 2.0) * dx
+        _, grid_center_x = get_center(grid.shape)
+        offset = -grid_center_x * dx
         ramp = np.exp(2j * np.pi * freq * offset)
         gauss_1d = np.sqrt(np.pi) * sigma * np.exp(-((np.pi * sigma * freq) ** 2))
         transfer = np.outer(gauss_1d * ramp, gauss_1d * ramp) / dx**2
