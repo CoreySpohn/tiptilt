@@ -14,6 +14,7 @@ import numpy as np
 import pytest
 from hwoutils.constants import s2d
 from hwoutils.grids import Frame, PixelGrid
+from optixstuff import FocalResponse
 from physicaloptix.speckle import ou_exposure_neff
 
 from tiptilt.speckle import (
@@ -553,15 +554,17 @@ class TestFeedsATabulatedField:
             creep_trajectory(jnp.asarray([1e-5, 0.0]), times_s=times),
         )
         field = TabulatedSpeckleField(
-            e_nom,
-            g,
+            FocalResponse(
+                e_nom,
+                g,
+                PixelGrid.regular(
+                    e_nom.shape, 0.25, "lod", frame=Frame(500.0, 1.0, "circumscribed")
+                ),
+                0.25**2,
+                500.0,
+            ),
             times,
             eps_table,
-            input_energy=0.25**2,
-            grid=PixelGrid.regular(
-                e_nom.shape, 0.25, "lod", frame=Frame(500.0, 1.0, "circumscribed")
-            ),
-            reference_wavelength_nm=500.0,
         )
         early = field.realize(wavelength_nm=500.0, time_d=(0.0) * s2d).data
         late = field.realize(wavelength_nm=500.0, time_d=(3000.0) * s2d).data
@@ -735,15 +738,17 @@ class TestExposureAveragingOnARealField:
         g = jnp.asarray(rng.standard_normal((2, 4, 4)) * (1 + 1j))
         e_nom = jnp.asarray(rng.standard_normal((4, 4)) * (1 + 1j))
         return TabulatedSpeckleField(
-            e_nom,
-            g,
+            FocalResponse(
+                e_nom,
+                g,
+                PixelGrid.regular(
+                    e_nom.shape, 0.25, "lod", frame=Frame(500.0, 1.0, "circumscribed")
+                ),
+                0.25**2,
+                500.0,
+            ),
             times,
             eps_table,
-            input_energy=0.25**2,
-            grid=PixelGrid.regular(
-                e_nom.shape, 0.25, "lod", frame=Frame(500.0, 1.0, "circumscribed")
-            ),
-            reference_wavelength_nm=500.0,
         )
 
     def test_matches_the_hand_averaged_midpoints(self):

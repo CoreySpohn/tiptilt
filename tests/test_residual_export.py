@@ -121,16 +121,19 @@ def test_realized_field_matches_direct_propagation():
     eps = _ramp_drift()
     for k in (0, 3, 5):
         drifted = eqx.tree_at(
-            lambda p: (p.stages[0].op.basis.coeffs, p.stages[1].op.basis.coeffs),
+            lambda p: (p.stages[0].op, p.stages[1].op),
             path,
-            (eps(k * COMMON["dt_s"] * s2d), trajectory[k]),
+            (
+                path.stages[0].op.with_command(eps(k * COMMON["dt_s"] * s2d)),
+                path.stages[1].op.with_command(trajectory[k]),
+            ),
         )
         out, _ = drifted.propagate(field)
         # compare in the seam's flux-fraction units: floor + delta == full
-        norm = residual.input_energy
+        norm = residual.response.input_energy
         direct = jnp.abs(out.data) ** 2 * out.grid.pixel_area / norm
         linear = (
-            jnp.abs(residual.e_nom) ** 2 / norm
+            jnp.abs(residual.response.e_nom) ** 2 * residual.grid.pixel_area / norm
             + residual.realize(wavelength_nm=WL, time_d=(k * COMMON["dt_s"]) * s2d).data
         )
         err = jnp.linalg.norm(linear - direct) / jnp.linalg.norm(direct)

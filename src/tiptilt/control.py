@@ -28,10 +28,6 @@ from physicaloptix import PhaseScreen
 from tiptilt.sensing import KalmanEstimator, PairwiseEstimator
 
 
-def _dm_coeffs(path, dm_index):
-    return path.stages[dm_index].op.basis.coeffs
-
-
 class DarkZoneModel(eqx.Module):
     """The controller-facing dark-zone linearization of one optical path.
 
@@ -84,9 +80,12 @@ class DarkZoneModel(eqx.Module):
         """The path with the stacked ``command`` split onto its mirrors."""
         chunks = jnp.split(command, list(self.split_points))
         return eqx.tree_at(
-            lambda p: [_dm_coeffs(p, i) for i in self.indices],
+            lambda path: tuple(path.stages[i].op for i in self.indices),
             self.path,
-            list(chunks),
+            tuple(
+                self.path.stages[i].op.with_command(chunk)
+                for i, chunk in zip(self.indices, chunks, strict=True)
+            ),
         )
 
     def focal_of(self, command, field):
@@ -172,7 +171,7 @@ class DarkZoneModel(eqx.Module):
         if not bool(jnp.any(mask)):
             raise ValueError("dark_zone_mask selects no pixels")
 
-        mode_counts = [path.stages[i].op.basis.n_modes for i in indices]
+        mode_counts = [path.stages[i].op.command.size for i in indices]
         n_total = sum(mode_counts)
         split_points = []
         running = 0
@@ -586,10 +585,8 @@ def close_dark_hole(
     ONCE (the control Jacobian is constant to first order in the small-signal
     dark-hole regime), builds a regularized real control matrix, then runs a
     differentiable ``lax.scan`` that RE-PROPAGATES for the measurement and updates
-    the command each step by swapping every DM's coefficients with
-    ``eqx.tree_at`` -- never a reconstruction, which would re-run the propagator's
-    construction-time gates. Because every propagation is a pure function, the
-    loop differentiates through the feedback (e.g. the final contrast with
+    the command through each mirror's with_command method. Each propagation
+    is pure, so the loop differentiates through feedback (the final contrast with
     respect to the loop gain). ``jacobian="matrix-free"`` replaces the stored
     control matrix with :class:`MatrixFreeEFCController` (re-linearized every
     step, nothing of Jacobian size stored) for mirrors too large to

@@ -3,14 +3,20 @@
 import jax.numpy as jnp
 import numpy as np
 import pytest
+from hwoutils.constants import two_pi
 from hwoutils.grids import Frame, PixelGrid
 from physicaloptix import (
+    BeamSplitter,
+    Branch,
     Field,
     Fraunhofer,
     OpticalPath,
+    OpticalSystem,
     PhaseScreen,
     PlaneKind,
     Stage,
+    command_response,
+    linearize_shared,
 )
 
 from tiptilt.control import close_dark_hole
@@ -176,7 +182,6 @@ class TestActuatorLattice:
         )
         assert np.linalg.norm(surface - explicit) < 1e-9 * np.linalg.norm(explicit)
         assert lattice.n_modes == n * n
-        assert lattice.B.shape == (0, 64, 64)  # modes are never materialized
 
     def test_axis_order_is_row_major_y_x(self):
         """Poking the (row 0, column n-1) actuator moves the surface peak to
@@ -194,9 +199,7 @@ class TestActuatorLattice:
         assert surface.max() == pytest.approx(1.0, rel=2e-3)
 
     def test_actuator_dm_is_a_phase_screen_that_the_driver_commands(self):
-        """ActuatorDM drops into close_dark_hole unchanged (it is a
-        PhaseScreen commanded through ``basis.coeffs``) and digs a hole with
-        the same fitting-error floor the dense device shows."""
+        """Fails if the driver or shared trunk cannot command an implicit lattice."""
         npix = 32
         grid = PixelGrid.pupil(npix)
         focal = PixelGrid.focal(48, 0.4, Frame(WL, 1.0, "circumscribed"))
@@ -225,6 +228,16 @@ class TestActuatorLattice:
         assert command.shape == (n * n,)
         assert float(history[-1]) < 0.1 * float(history[0])
         assert np.asarray(dm.surface(command)).shape == (npix, npix)
+        split = BeamSplitter.energy(0.0, grid=grid, plane=PlaneKind.PUPIL)
+        system = OpticalSystem(
+            OpticalPath((Stage("dm", dm),)),
+            split,
+            (Branch("pupil", "transmit", OpticalPath(())),),
+        )
+        tangent = jnp.zeros_like(command).at[n + 1].set(1.0)
+        got = command_response(system, field, "dm").jvp(tangent)["pupil"]
+        expected = 1j * two_pi * dm.surface(tangent) * field.data / WL
+        np.testing.assert_allclose(got, expected, rtol=1e-12, atol=1e-14)
 
     def test_rejects_a_mismatched_grid_and_bad_parameters(self):
         lattice = ActuatorLattice.build(PixelGrid.pupil(16), n_across=4, pitch=0.2)
@@ -258,19 +271,19 @@ class TestHardwareDM:
         assert type(ideal) is PhaseScreen
         hardware = HardwareDM(ideal.basis, grid, wavelength_nm=WL)  # knobs all default
         command = jnp.linspace(-3.0, 3.0, device.n_active)
-        set_ideal = eqx_set(ideal, command)
-        set_hw = eqx_set(hardware, command)
+        set_ideal = ideal.with_command(command)
+        set_hw = hardware.with_command(command)
         assert jnp.allclose(set_hw(field).data, set_ideal(field).data)
 
     def test_quantization_staircase(self):
         _grid, device, field = _pupil_setup(dac_step_nm=2.0)
         screen = device.screen
         n = device.n_active
-        sub_lsb = eqx_set(screen, jnp.full(n, 0.9))  # below step/2 -> rounds to 0
-        flat = eqx_set(screen, jnp.zeros(n))
+        sub_lsb = screen.with_command(jnp.full(n, 0.9))  # below step/2 -> rounds to 0
+        flat = screen.with_command(jnp.zeros(n))
         assert jnp.allclose(sub_lsb(field).data, flat(field).data)
-        one_step = eqx_set(screen, jnp.full(n, 1.4))  # rounds to 2.0
-        exact = eqx_set(screen, jnp.full(n, 2.0))
+        one_step = screen.with_command(jnp.full(n, 1.4))  # rounds to 2.0
+        exact = screen.with_command(jnp.full(n, 2.0))
         # quantized 1.4 nm command == exactly-2 nm command, != flat
         ideal_two = PhaseScreen(
             eqx_coeffs(screen.basis, jnp.full(n, 2.0)), _grid, wavelength_nm=WL
@@ -279,27 +292,38 @@ class TestHardwareDM:
         assert not jnp.allclose(one_step(field).data, flat(field).data)
         del exact
 
-    def test_jacobian_stays_ideal_through_quantizer(self):
+    def test_jacobian_keeps_gains_and_straight_through_quantizer(self):
+        """Fails if command derivatives skip hardware gains or round tangents."""
         from tiptilt.control import DarkZoneModel
 
-        grid, device, field = _pupil_setup(dac_step_nm=2.0)
-        _g2, ideal_dev, _f2 = _pupil_setup()
+        grid, ideal_dev, field = _pupil_setup()
+        gains = jnp.ones(ideal_dev.n_active).at[3].set(0.5)
+        _, device, _ = _pupil_setup(actuator_gains=gains, dac_step_nm=2.0)
         focal = PixelGrid.focal(32, 0.5, Frame(WL, 1.0, "circumscribed"))
         fxg, fyg = map(np.asarray, focal.coordinates())
         mask = jnp.asarray((np.abs(fxg - 3.0) < 0.8) & (np.abs(fyg) < 0.8))
 
-        def model_for(screen):
-            path = OpticalPath(
-                stages=(
-                    Stage("dm", screen),
-                    Stage("science", Fraunhofer(grid_in=grid, grid_out=focal)),
-                )
-            )
-            return DarkZoneModel.build(path, 0, mask, jacobian_field=field)
+        arm = OpticalPath((Stage("science", Fraunhofer(grid_in=grid, grid_out=focal)),))
+        split = BeamSplitter.energy(0.0, grid=grid, plane=PlaneKind.PUPIL)
 
-        g_hw = model_for(device.screen).g_dz
-        g_ideal = model_for(ideal_dev.screen).g_dz
-        assert jnp.allclose(g_hw, g_ideal, atol=1e-12)
+        def system_for(screen):
+            return OpticalSystem(
+                OpticalPath((Stage("dm", screen),)),
+                split,
+                (Branch("science", "transmit", arm),),
+            )
+
+        ideal, hardware = system_for(ideal_dev.screen), system_for(device.screen)
+        ideal_path, _ = ideal.as_channel_path("science")
+        hardware_path, _ = hardware.as_channel_path("science")
+        g_ideal = DarkZoneModel.build(ideal_path, 0, mask, jacobian_field=field).g_dz
+        g_hw = DarkZoneModel.build(hardware_path, 0, mask, jacobian_field=field).g_dz
+        assert jnp.max(jnp.abs(g_ideal[:, 3])) > 1e-6
+        np.testing.assert_allclose(g_hw, g_ideal * gains, atol=1e-12)
+        shared = linearize_shared(hardware, field, wavelength_nm=WL, shared_stage="dm")
+        np.testing.assert_allclose(
+            shared["science"].g_shared[:, mask].T, g_hw, atol=1e-12
+        )
 
     def test_dead_actuator_ignores_command_and_zeroes_jacobian(self):
         from tiptilt.control import DarkZoneModel
@@ -309,8 +333,8 @@ class TestHardwareDM:
         ).n_active
         gains = jnp.ones(n_probe).at[3].set(0.0)
         grid, device, field = _pupil_setup(actuator_gains=gains)
-        poke_dead = eqx_set(device.screen, jnp.zeros(n_probe).at[3].set(50.0))
-        flat = eqx_set(device.screen, jnp.zeros(n_probe))
+        poke_dead = device.screen.with_command(jnp.zeros(n_probe).at[3].set(50.0))
+        flat = device.screen.with_command(jnp.zeros(n_probe))
         assert jnp.allclose(poke_dead(field).data, flat(field).data)
 
         focal = PixelGrid.focal(32, 0.5, Frame(WL, 1.0, "circumscribed"))
@@ -335,13 +359,13 @@ class TestHardwareDM:
         grid, device, field = _pupil_setup(
             actuator_gains=jnp.ones(n).at[5].set(0.0), actuator_offsets_nm=offsets
         )
-        flat_cmd = eqx_set(device.screen, jnp.zeros(n))
+        flat_cmd = device.screen.with_command(jnp.zeros(n))
         ideal = PhaseScreen(
             eqx_coeffs(device.screen.basis, offsets), grid, wavelength_nm=WL
         )
         assert jnp.allclose(flat_cmd(field).data, ideal(field).data)
         # commanding the stuck actuator changes nothing
-        poke_stuck = eqx_set(device.screen, jnp.zeros(n).at[5].set(80.0))
+        poke_stuck = device.screen.with_command(jnp.zeros(n).at[5].set(80.0))
         assert jnp.allclose(poke_stuck(field).data, flat_cmd(field).data)
 
     def test_validation_errors(self):
@@ -367,12 +391,6 @@ class TestHardwareScenarios:
         open_loop = run(hardware_dm(stuck_nm=40.0), "open-loop")
         assert result.metrics.final_contrast < 0.3 * result.metrics.initial_contrast
         assert result.metrics.final_contrast < 0.3 * open_loop.metrics.final_contrast
-
-
-def eqx_set(screen, command):
-    import equinox as eqx
-
-    return eqx.tree_at(lambda s: s.basis.coeffs, screen, jnp.asarray(command))
 
 
 def eqx_coeffs(basis, coeffs):

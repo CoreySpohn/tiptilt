@@ -6,6 +6,7 @@ import numpy as np
 import pytest
 from hwoutils.constants import s2d
 from hwoutils.grids import Frame, PixelGrid
+from optixstuff import FocalResponse
 from physicaloptix import ChannelLinearization, MultiChannelLinearization
 
 from tiptilt.speckle import TabulatedSpeckleField, correlated_channel_fields
@@ -84,10 +85,12 @@ class TestCorrelatedChannelFields:
             psd=psd,
         )
         for name in ("a", "b"):
-            assert float(fields[name].input_energy) == pytest.approx(mcl.input_energy)
+            assert float(fields[name].response.input_energy) == pytest.approx(
+                mcl.input_energy
+            )
             assert fields[name].grid == mcl[name].grid
             np.testing.assert_allclose(
-                fields[name].G,
+                fields[name].response.per_pixel()[1],
                 mcl[name].g_shared * np.sqrt(mcl[name].grid.pixel_area),
                 rtol=4 * np.finfo(float).eps,
             )
@@ -153,7 +156,7 @@ class TestCorrelatedChannelFields:
         amp_b = np.asarray(fields["b"].amplitudes)
         np.testing.assert_array_equal(amp_a[:M_SHARED], amp_b[:M_SHARED])
         assert not np.allclose(amp_a[M_SHARED:], amp_b[M_SHARED:])
-        assert fields["a"].G.shape[0] == M_SHARED + 2
+        assert fields["a"].response.G.shape[0] == M_SHARED + 2
 
     def test_channel_normalization_derives_from_shared_primitives(self):
         """Two channels with different plate scales get different derived
@@ -184,18 +187,20 @@ class TestTabulatedEpsAccessor:
         times = jnp.asarray([0.0, 1.0, 2.0])
         table = jnp.asarray([[0.0, 0.0], [1.0, 2.0], [2.0, 4.0]])
         field = TabulatedSpeckleField(
-            e_nom=jnp.zeros((4, 4), dtype=complex),
-            G=jnp.zeros((2, 4, 4), dtype=complex),
+            FocalResponse(
+                jnp.zeros((4, 4), dtype=complex),
+                jnp.zeros((2, 4, 4), dtype=complex),
+                PixelGrid.regular(
+                    (jnp.zeros((4, 4), dtype=complex)).shape,
+                    0.25,
+                    "lod",
+                    frame=Frame(500.0, 1.0, "circumscribed"),
+                ),
+                _E_IN,
+                500.0,
+            ),
             times_s=times,
             eps_table=table,
-            input_energy=_E_IN,
-            grid=PixelGrid.regular(
-                (jnp.zeros((4, 4), dtype=complex)).shape,
-                0.25,
-                "lod",
-                frame=Frame(500.0, 1.0, "circumscribed"),
-            ),
-            reference_wavelength_nm=500.0,
         )
         np.testing.assert_allclose(
             np.asarray(field.coefficients((0.5) * s2d)),

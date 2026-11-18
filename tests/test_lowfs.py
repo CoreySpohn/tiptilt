@@ -34,9 +34,8 @@ def test_calibration_predicts_poked_image(calibration):
     p, reference, response = calibration
     poke = jnp.asarray([2.0, -1.0, 1.5])
     idx = _fsm_index(p["system"])
-    poked = eqx.tree_at(
-        lambda s: s.trunk.stages[idx].op.basis.coeffs, p["system"], poke
-    )
+    optic = p["system"].trunk.stages[idx].op.with_command(poke)
+    poked = eqx.tree_at(lambda s: s.trunk.stages[idx].op, p["system"], optic)
     outputs, _ = poked.propagate(p["input_field"])
     image = jnp.abs(outputs[p["sense"]].data) ** 2
     predicted = reference + (response @ poke).reshape(reference.shape)
@@ -48,9 +47,8 @@ def test_reconstruct_recovers_drift_including_focus(calibration):
     p, reference, response = calibration
     injected = jnp.asarray([3.0, -2.0, 2.0])  # tip, tilt, focus in nm
     idx = [stage.name for stage in p["system"].trunk.stages].index("jitter")
-    drifted = eqx.tree_at(
-        lambda s: s.trunk.stages[idx].op.basis.coeffs, p["system"], injected
-    )
+    optic = p["system"].trunk.stages[idx].op.with_command(injected)
+    drifted = eqx.tree_at(lambda s: s.trunk.stages[idx].op, p["system"], optic)
     outputs, _ = drifted.propagate(p["input_field"])
     image = jnp.abs(outputs[p["sense"]].data) ** 2
     recovered = zwfs_reconstruct(image, reference, response)

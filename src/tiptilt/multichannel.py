@@ -264,22 +264,27 @@ def run_multichannel(
             )
             local[name] = (branch_idx, stage_idx, jnp.asarray(table))
 
+    drift = system.trunk.stages[trunk_drift].op
+    mirror = system.trunk.stages[trunk_dm].op
+
     def with_state(command, frame):
         updated = eqx.tree_at(
             lambda s: (
-                s.trunk.stages[trunk_drift].op.basis.coeffs,
-                s.trunk.stages[trunk_dm].op.basis.coeffs,
+                s.trunk.stages[trunk_drift].op,
+                s.trunk.stages[trunk_dm].op,
             ),
             system,
-            (jnp.asarray(drift_table[frame]), command),
+            (
+                drift.with_command(jnp.asarray(drift_table[frame])),
+                mirror.with_command(command),
+            ),
         )
-        for _name, (branch_idx, stage_idx, table) in local.items():
+        for branch_idx, stage_idx, table in local.values():
+            optic = updated.branches[branch_idx].path.stages[stage_idx].op
             updated = eqx.tree_at(
-                lambda s, b=branch_idx, st=stage_idx: (
-                    s.branches[b].path.stages[st].op.basis.coeffs
-                ),
+                lambda s, b=branch_idx, st=stage_idx: s.branches[b].path.stages[st].op,
                 updated,
-                table[frame],
+                optic.with_command(table[frame]),
             )
         return updated
 

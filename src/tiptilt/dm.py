@@ -164,7 +164,7 @@ class HardwareDM(PhaseScreen):
         """Validate the hardware fields against the basis."""
         if self.dac_step_nm is not None and self.dac_step_nm <= 0.0:
             raise ValueError(f"dac_step_nm must be positive, got {self.dac_step_nm}")
-        n_modes = self.basis.B.shape[0]
+        n_modes = self.command.size
         for name, values in (
             ("actuator_gains", self.actuator_gains),
             ("actuator_offsets_nm", self.actuator_offsets_nm),
@@ -175,8 +175,13 @@ class HardwareDM(PhaseScreen):
                 )
 
     def realized_command(self):
-        """The command the hardware actually applies, in nm."""
-        command = self.basis.coeffs
+        """Return the hardware command in nm after quantization, gains and offsets.
+
+        The DAC rounds the forward command to its physical staircase. Its
+        straight-through derivative treats rounding as the identity, so
+        command tangents retain the per-actuator gains.
+        """
+        command = self.command
         if self.dac_step_nm is not None:
             command = self.dac_step_nm * _round_straight_through(
                 command / self.dac_step_nm
@@ -187,10 +192,9 @@ class HardwareDM(PhaseScreen):
             command = command + self.actuator_offsets_nm
         return command
 
-    def __call__(self, field):
-        """Apply the phase of the REALIZED (not commanded) surface."""
-        realized = eqx.tree_at(lambda s: s.basis.coeffs, self, self.realized_command())
-        return PhaseScreen.__call__(realized, field)
+    def opd(self):
+        """The applied optical path difference after the hardware response."""
+        return PhaseScreen.opd(self.with_command(self.realized_command()))
 
 
 class DeformableMirror(eqx.Module):
@@ -310,7 +314,7 @@ class DeformableMirror(eqx.Module):
         Returns:
             The summed influence-function surface.
         """
-        return jnp.tensordot(command, self.screen.basis.B, axes=1)
+        return self.screen.with_command(command).basis.opd()
 
 
 class ActuatorLattice(eqx.Module):
@@ -337,10 +341,8 @@ class ActuatorLattice(eqx.Module):
     wrapped rows land inside the illuminated pupil is the caller's geometry to
     check, since a controller would otherwise be handed unphysical authority.
 
-    Quacks like a ``ModeBasis`` for the control seams (``coeffs``, ``n_modes``,
-    ``opd``, ``kind``); ``B`` is an EMPTY stack so that the ``PhaseScreen``
-    grid check passes while consumers that need dense modes refuse it
-    (``probe_set`` raises; ``linearize``'s analytic route fails on the shape).
+    PhaseScreen uses its coeffs, kind, grid_shape and opd map. Algorithms
+    that need explicit influence functions take a sampled ModeBasis.
 
     Attributes:
         coeffs: The command, ``(n_across * n_across,)`` nm OPD pokes.
@@ -433,9 +435,9 @@ class ActuatorLattice(eqx.Module):
         return self.n_across * self.n_across
 
     @property
-    def B(self):
-        """An EMPTY mode stack ``(0, npix, npix)``: modes are never stored."""
-        return jnp.zeros((0, self.npix, self.npix))
+    def grid_shape(self):
+        """Spatial shape of the sampled surface."""
+        return (self.npix, self.npix)
 
     def opd(self):
         """The OPD map of the current command, ``(npix, npix)`` in nm."""
@@ -451,12 +453,9 @@ class ActuatorLattice(eqx.Module):
 class ActuatorDM(PhaseScreen):
     """A deformable mirror on an :class:`ActuatorLattice`: flight-scale ready.
 
-    A drop-in ``PhaseScreen`` whose ``basis`` is the FFT-evaluated lattice, so
-    every driver that swaps ``stage.op.basis.coeffs`` commands it unchanged
-    and the ``jacfwd`` / matrix-free Jacobians differentiate through the
-    convolution. Use it where :class:`DeformableMirror` would materialize an
-    impossible mode stack; use the dense device where probe generation or
-    the analytic linearization need explicit modes.
+    The inherited with_command sets the FFT-evaluated lattice command.
+    Command derivatives differentiate through the convolution. Use this
+    device when a dense influence-function stack would exceed memory.
     """
 
     basis: ActuatorLattice
@@ -472,14 +471,6 @@ class ActuatorDM(PhaseScreen):
                 out-of-pupil mirror behind a Fresnel relay).
         """
         super().__init__(lattice, grid, wavelength_nm=wavelength_nm, plane=plane)
-
-    def __check_init__(self):
-        """The lattice must have been built on this grid."""
-        if self.basis.npix != self.grid.shape[0]:
-            raise ValueError(
-                f"lattice built on {self.basis.npix} pixels does not match grid "
-                f"({self.grid.shape[0]})"
-            )
 
     @classmethod
     def build(

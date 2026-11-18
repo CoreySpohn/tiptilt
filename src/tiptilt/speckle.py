@@ -35,21 +35,20 @@ replays::
         ou_trajectory(covariance_nm2, timescales_s, key=key, times_s=times_s),
         creep_trajectory(rates_nm_per_s, times_s=times_s),
     )
-    field = TabulatedSpeckleField(
-        e_nom, G, times_s, eps, input_energy=e_in, grid=grid,
-        reference_wavelength_nm=grid.frame.reference_wavelength_nm,
-    )
+    response = FocalResponse(e_nom, G, grid, e_in, grid.frame.reference_wavelength_nm)
+    field = TabulatedSpeckleField(response, times_s, eps)
 """
 
 import warnings
 
+import equinox as eqx
 import jax
 import jax.numpy as jnp
 import numpy as np
 from hwoutils.constants import d2s
 from hwoutils.spectral import trapezoid_weights
 from jaxtyping import Array
-from optixstuff.speckle import LinearSpeckleField
+from optixstuff import FocalResponse, LinearSpeckleField
 from physicaloptix import AnalyticSpeckleField
 
 # Below this effective frequency count a single frozen realization's modal
@@ -217,16 +216,12 @@ def _draw_correlated_spectrum(covariance_nm2, key, weights):
 
 
 def correlated_drift_field(
-    e_nom,
-    G,
+    response: FocalResponse,
     covariance_nm2,
     *,
     key,
     frequencies_hz,
     psd,
-    input_energy,
-    grid,
-    reference_wavelength_nm,
     epoch_d=0.0,
 ):
     """Build a stationary speckle field with a target cross-mode covariance.
@@ -253,8 +248,7 @@ def correlated_drift_field(
     emits a warning. The coherent cross term needs float64 inputs (x64 enabled).
 
     Args:
-        e_nom: Complex nominal density amplitude, shape ``(y, x)``.
-        G: Density-amplitude sensitivity, shape ``(m, y, x)``.
+        response: Monochromatic focal response with the drifting modes in order.
         covariance_nm2: Target ``(m, m)`` real symmetric positive-semidefinite
             ensemble modal covariance in nm^2.
         key: A JAX PRNG key freezing the drawn realization.
@@ -262,11 +256,6 @@ def correlated_drift_field(
         psd: Temporal power spectral density at each frequency, shape ``(f,)``
             (nonnegative, positive total; only its shape matters, it is
             renormalized).
-        input_energy: Total energy of the field handed to the coronagraph
-            train at the pre-coronagraph reference plane
-            (``field.energy()``). Density amplitudes gain sqrt(pixel_area) once.
-        grid: Native focal PixelGrid with its provenance Frame.
-        reference_wavelength_nm: Wavelength of the supplied density amplitudes.
         epoch_d: Days from the scene epoch mapping to ``time_s = 0``. Default 0.0.
 
     Returns:
@@ -294,27 +283,19 @@ def correlated_drift_field(
     weights = jnp.asarray(2.0 * power / total)
     amplitudes, phases = _draw_correlated_spectrum(covariance_nm2, key, weights)
     return AnalyticSpeckleField(
-        jnp.asarray(e_nom) * jnp.sqrt(grid.pixel_area),
-        jnp.asarray(G) * jnp.sqrt(grid.pixel_area),
+        response,
         amplitudes=amplitudes,
         frequencies_hz=jnp.asarray(frequencies_hz),
         phases=phases,
-        input_energy=input_energy,
-        grid=grid,
-        reference_wavelength_nm=reference_wavelength_nm,
         epoch_d=epoch_d,
     )
 
 
 def grouped_drift_field(
-    e_nom,
-    G,
+    response: FocalResponse,
     groups,
     *,
     key,
-    input_energy,
-    grid,
-    reference_wavelength_nm,
     epoch_d=0.0,
 ):
     """Stationary field whose mode BLOCKS drift on different timescales.
@@ -335,18 +316,11 @@ def grouped_drift_field(
     cross-spectral density rather than a list.
 
     Args:
-        e_nom: Complex nominal density amplitude, shape ``(y, x)``.
-        G: Complex sensitivity ``d(E_focal)/d(mode)``, shape ``(m, y, x)``,
-            whose mode axis is the blocks concatenated in order.
+        response: Monochromatic focal response with the drifting modes in order.
         groups: Sequence of ``(covariance_nm2, frequencies_hz, psd)``. Every
             block needs the same NUMBER of frequencies (they stack into one
             ``(m, f)`` array) but the grids and PSD shapes may differ.
         key: A JAX PRNG key freezing the drawn realization.
-        input_energy: Total energy of the field handed to the coronagraph
-            train at the pre-coronagraph reference plane
-            (``field.energy()``); see :func:`correlated_drift_field`.
-        grid: Native focal PixelGrid with its provenance Frame.
-        reference_wavelength_nm: Wavelength of the supplied density amplitudes.
         epoch_d: Days from the scene epoch mapping to ``time_s = 0``. Default 0.0.
 
     Returns:
@@ -382,10 +356,10 @@ def grouped_drift_field(
 
     amplitudes = jnp.concatenate(amplitude_blocks, axis=0)
     phases = jnp.concatenate(phase_blocks, axis=0)
-    if amplitudes.shape[0] != G.shape[0]:
+    if amplitudes.shape[0] != response.G.shape[0]:
         raise ValueError(
             f"the blocks supply {amplitudes.shape[0]} modes but G has "
-            f"{G.shape[0]}; G's mode axis must be the blocks concatenated "
+            f"{response.G.shape[0]}; G's mode axis must be the blocks concatenated "
             "in order"
         )
     frequencies = jnp.concatenate(freq_blocks, axis=0)
@@ -394,14 +368,10 @@ def grouped_drift_field(
     if bool(jnp.all(frequencies == frequencies[:1])):
         frequencies = frequencies[0]
     return AnalyticSpeckleField(
-        jnp.asarray(e_nom) * jnp.sqrt(grid.pixel_area),
-        jnp.asarray(G) * jnp.sqrt(grid.pixel_area),
+        response,
         amplitudes=amplitudes,
         frequencies_hz=frequencies,
         phases=phases,
-        input_energy=input_energy,
-        grid=grid,
-        reference_wavelength_nm=reference_wavelength_nm,
         epoch_d=epoch_d,
     )
 
@@ -475,53 +445,28 @@ def correlated_channel_fields(
             amplitudes = jnp.concatenate([shared_amp, local_amp], axis=0)
             phases = jnp.concatenate([shared_phase, local_phase], axis=0)
         fields[name] = AnalyticSpeckleField(
-            channel.e_nom * jnp.sqrt(channel.grid.pixel_area),
-            g * jnp.sqrt(channel.grid.pixel_area),
+            FocalResponse(
+                channel.e_nom, g, channel.grid, mcl.input_energy, mcl.wavelength_nm
+            ),
             amplitudes=amplitudes,
             frequencies_hz=jnp.asarray(frequencies_hz),
             phases=phases,
-            input_energy=mcl.input_energy,
-            grid=channel.grid,
-            reference_wavelength_nm=mcl.wavelength_nm,
             epoch_d=epoch_d,
         )
     return fields
 
 
 class TabulatedSpeckleField(LinearSpeckleField):
-    """Replay density-amplitude inputs on their native focal grid.
+    """Replay modal trajectories through a monochromatic focal response.
 
-    Construction converts both density amplitudes to sqrt(energy/pixel).
-    The inherited law includes interference with e_nom; pass e_nom=0 for
-    a pure halo. Coefficients interpolate elapsed seconds from epoch_d,
-    holding endpoints outside the table. Public timestamps are scene days.
+    The inherited law includes interference with e_nom; a zero nominal
+    response produces a pure halo. Coefficients interpolate elapsed seconds
+    from epoch_d, holding endpoints outside the table. Public timestamps are
+    scene days.
     """
 
-    times_s: Array
-    eps_table: Array
-
-    def __init__(
-        self,
-        e_nom,
-        G,
-        times_s,
-        eps_table,
-        *,
-        input_energy,
-        grid,
-        reference_wavelength_nm,
-        epoch_d=0.0,
-    ):
-        """Convert density amplitudes once and retain the coefficient table."""
-        pixel_amplitude = jnp.sqrt(grid.pixel_area)
-        self.e_nom = jnp.asarray(e_nom) * pixel_amplitude
-        self.G = jnp.asarray(G) * pixel_amplitude
-        self.input_energy = jnp.asarray(input_energy)
-        self.grid = grid
-        self.reference_wavelength_nm = float(reference_wavelength_nm)
-        self.epoch_d = float(epoch_d)
-        self.times_s = jnp.asarray(times_s)
-        self.eps_table = jnp.asarray(eps_table)
+    times_s: Array = eqx.field(converter=jnp.asarray)
+    eps_table: Array = eqx.field(converter=jnp.asarray)
 
     def __check_init__(self):
         """Require a nonempty ascending table with one column per mode."""
@@ -534,9 +479,9 @@ class TabulatedSpeckleField(LinearSpeckleField):
             times = np.asarray(self.times_s)
             if not np.all(np.isfinite(times)) or np.any(np.diff(times) <= 0):
                 raise ValueError("times_s must be finite and strictly increasing")
-        if self.G.shape[0] != n_modes:
+        if self.response.G.shape[0] != n_modes:
             raise ValueError(
-                f"G has {self.G.shape[0]} modes but eps_table has {n_modes}"
+                f"G has {self.response.G.shape[0]} modes but eps_table has {n_modes}"
             )
 
     def coefficients(self, time_d):

@@ -25,7 +25,7 @@ import jax
 import jax.numpy as jnp
 from hwoutils.constants import s2d
 from hwoutils.spectral import Quadrature
-from optixstuff import ElectronRates, FramePlan, PhotonRates
+from optixstuff import ElectronRates, FocalResponse, FramePlan, PhotonRates
 from physicaloptix import PhaseScreen
 
 from tiptilt.control import DarkZoneModel, EFCController
@@ -225,10 +225,11 @@ def maintain_dark_hole(
 
     def drifted(model_view, time_d):
         """The model view with the TRUE system's drift screen advanced."""
+        optic = model_view.path.stages[drift_stage].op
         return eqx.tree_at(
-            lambda m: m.path.stages[drift_stage].op.basis.coeffs,
+            lambda model: model.path.stages[drift_stage].op,
             model_view,
-            jnp.asarray(eps_of(time_d)),
+            optic.with_command(jnp.asarray(eps_of(time_d))),
         )
 
     command = command0
@@ -328,14 +329,15 @@ def maintained_residual_field(
         operating_point=command0,
     )
     eps_of = drift.coefficients if hasattr(drift, "coefficients") else drift
-    n_drift = path.stages[drift_stage].op.basis.coeffs.shape[0]
+    optic = dz_model.path.stages[drift_stage].op
+    n_drift = optic.command.size
     zero_drift = jnp.zeros(n_drift)
 
     def full_focal(drift_coeffs, command):
         dz_true = eqx.tree_at(
-            lambda m: m.path.stages[drift_stage].op.basis.coeffs,
+            lambda model: model.path.stages[drift_stage].op,
             dz_model,
-            drift_coeffs,
+            optic.with_command(drift_coeffs),
         )
         return dz_true.focal_of(command, input_field)
 
@@ -354,14 +356,12 @@ def maintained_residual_field(
     # here rather than asked of the caller: realized maps are per-pixel flux
     # fractions of the pre-coronagraph input energy.
     output, _ = dz_model.path.propagate(input_field)
-    field = TabulatedSpeckleField(
+    response = FocalResponse(
         e_nom,
         sensitivity,
-        times_s,
-        eps_table,
-        input_energy=float(input_field.energy()),
-        grid=output.grid,
-        reference_wavelength_nm=output.grid.frame.reference_wavelength_nm,
-        epoch_d=epoch_d,
+        output.grid,
+        input_field.energy(),
+        output.grid.frame.reference_wavelength_nm,
     )
+    field = TabulatedSpeckleField(response, times_s, eps_table, epoch_d=epoch_d)
     return field, history

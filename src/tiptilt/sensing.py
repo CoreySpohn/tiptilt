@@ -14,7 +14,7 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 from jaxtyping import Array
-from physicaloptix import Field, PlaneKind
+from physicaloptix import Field, ModeBasis, PlaneKind
 
 
 def probe_set(basis, *, amplitude_nm, n_probes=3, seed=0):
@@ -42,13 +42,13 @@ def probe_set(basis, *, amplitude_nm, n_probes=3, seed=0):
     Returns:
         A list of ``n_probes`` command vectors (each shape ``(n_modes,)``).
     """
-    modes = basis.B
-    n_modes = modes.shape[0]
-    if n_modes == 0:
+    if not isinstance(basis, ModeBasis) or basis.n_modes == 0:
         raise ValueError(
             "probe_set needs a dense mode stack; this basis stores none "
             "(an ActuatorLattice) so build its probes from actuator commands"
         )
+    modes = basis.B
+    n_modes = basis.n_modes
     probes = []
     for key in jax.random.split(jax.random.PRNGKey(seed), n_probes):
         coeffs = jax.random.normal(key, (n_modes,))
@@ -60,7 +60,8 @@ def probe_set(basis, *, amplitude_nm, n_probes=3, seed=0):
 
 def _with_command(path, dm_index, command):
     """A copy of ``path`` with deformable-mirror ``dm_index`` set to ``command``."""
-    return eqx.tree_at(lambda p: p.stages[dm_index].op.basis.coeffs, path, command)
+    mirror = path.stages[dm_index].op.with_command(command)
+    return eqx.tree_at(lambda p: p.stages[dm_index].op, path, mirror)
 
 
 def _focal_field(path, field, dm_index, command):
@@ -102,7 +103,7 @@ def probe_measurement(
         both flattened over ``dark_zone_mask`` to ``(n_dark,)``, or ``(nlam,
         n_dark)`` for a chromatic field (one row per wavelength / sub-band).
     """
-    command = path.stages[dm_index].op.basis.coeffs
+    command = path.stages[dm_index].op.command
     e_plus = _focal_field(path, input_field, dm_index, command + probe)
     e_minus = _focal_field(path, input_field, dm_index, command - probe)
     i_plus = jnp.abs(e_plus) ** 2

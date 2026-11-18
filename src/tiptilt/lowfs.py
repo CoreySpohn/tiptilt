@@ -68,11 +68,12 @@ def lowfs_calibrate(system, input_field, *, arm, stage):
     """
     _branch_check(system, arm)
     index = _trunk_stage_index(system, stage, "calibration")
-    base = system.trunk.stages[index].op.basis.coeffs
+    optic = system.trunk.stages[index].op
+    base = optic.command
 
     def image_of(coeffs):
         updated = eqx.tree_at(
-            lambda s: s.trunk.stages[index].op.basis.coeffs, system, coeffs
+            lambda s: s.trunk.stages[index].op, system, optic.with_command(coeffs)
         )
         outputs, _ = updated.propagate(input_field)
         return jnp.abs(outputs[arm].data) ** 2
@@ -144,7 +145,9 @@ def run_pointing_loop(
     drift_index = _trunk_stage_index(system, drift_stage, "drift")
     corrector_index = _trunk_stage_index(system, corrector_stage, "corrector")
     drift_table = jnp.asarray(drift_table)
-    n_modes = system.trunk.stages[corrector_index].op.basis.coeffs.shape[0]
+    drift = system.trunk.stages[drift_index].op
+    corrector = system.trunk.stages[corrector_index].op
+    n_modes = corrector.command.size
     if drift_table.shape[1] != n_modes:
         raise ValueError(
             f"drift table has {drift_table.shape[1]} modes, corrector has "
@@ -162,11 +165,11 @@ def run_pointing_loop(
     def with_state(command, frame):
         return eqx.tree_at(
             lambda s: (
-                s.trunk.stages[drift_index].op.basis.coeffs,
-                s.trunk.stages[corrector_index].op.basis.coeffs,
+                s.trunk.stages[drift_index].op,
+                s.trunk.stages[corrector_index].op,
             ),
             system,
-            (drift_table[frame], command),
+            (drift.with_command(drift_table[frame]), corrector.with_command(command)),
         )
 
     command = jnp.zeros(n_modes)
