@@ -52,7 +52,7 @@ def make_detector(
 
     Args:
         flux: Photons/s per unit normalized intensity (the star brightness).
-        exposure_time: Exposure seconds per frame.
+        exposure_time: Exposure seconds per frame in the single sensor band.
         detector_model: Detector or ReparameterizedDetector with readout noise.
         wavelength_nm: Sensor wavelength at which detector yield is evaluated.
         reference_peak: The intensity that corresponds to unit normalized
@@ -67,8 +67,11 @@ def make_detector(
     unit_rates = detector_model.electrons(
         PhotonRates(star_leakage=jnp.full((1, 1), flux)), quadrature
     )
-    scale = unit_rates.total()[0] * exposure_time
-    background, _ = detector_model.mean_and_variance(ElectronRates(), plan)
+    unit_total = unit_rates.total()
+    scale = (unit_total * plan.live_time_s)[0]
+    background, _ = detector_model.mean_and_variance(
+        ElectronRates(thermal=jnp.zeros_like(unit_total)), plan
+    )
 
     @eqx.filter_jit
     def detector(image, key):
@@ -76,7 +79,7 @@ def make_detector(
             star_leakage=jnp.maximum(image / reference_peak, 0.0)[None, None] * flux
         )
         rates = detector_model.electrons(photons, quadrature)
-        counts = detector_model.draw(key, rates, plan)[0] - background
+        counts = detector_model.draw(key, rates, plan)[0] - background[0]
         return reference_peak * counts / scale
 
     return detector
