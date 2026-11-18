@@ -1,5 +1,31 @@
 # Changelog
 
+## [2.0.0](https://github.com/CoreySpohn/tiptilt/compare/v1.0.0...v2.0.0) (2026-11-18)
+
+
+### ⚠ BREAKING CHANGES
+
+* update commands through with_command and build speckle drift on FocalResponse
+* **speckle:** take ou_exposure_neff from physicaloptix
+* integrate every speckle PSD with trapezoid widths and take DM centres from hwoutils
+* **speckle:** build tabulated speckle fields on the shared linear speckle field with days and real grids
+
+### Features
+
+* **speckle:** build tabulated speckle fields on the shared linear speckle field with days and real grids ([77bc4f2](https://github.com/CoreySpohn/tiptilt/commit/77bc4f26ce0188727715a70750c40891cbe6df57))
+
+
+### Bug Fixes
+
+* build detector background with a band-aligned frame plan ([95eda05](https://github.com/CoreySpohn/tiptilt/commit/95eda05366f4f20ded5d36bc383cecb3233ed174))
+
+
+### Code Refactoring
+
+* integrate every speckle PSD with trapezoid widths and take DM centres from hwoutils ([ab2c974](https://github.com/CoreySpohn/tiptilt/commit/ab2c97486389e6ef20101236496d4c887d501542))
+* **speckle:** take ou_exposure_neff from physicaloptix ([2f45638](https://github.com/CoreySpohn/tiptilt/commit/2f45638ee6c513da48aaecc7f2d44da5f12dcf97))
+* update commands through with_command and build speckle drift on FocalResponse ([3afc526](https://github.com/CoreySpohn/tiptilt/commit/3afc52668ac18a9a56f416049f3fa2f7d17adf46))
+
 ## [1.0.0](https://github.com/CoreySpohn/tiptilt/compare/v0.3.0...v1.0.0) (2026-11-16)
 
 
