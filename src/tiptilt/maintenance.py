@@ -61,24 +61,24 @@ def make_detector(
     Returns:
         ``callable(image, key) -> image`` in the same normalized units.
     """
-    # One explicit 1 nm channel represents the already integrated mono rate.
-    quadrature = Quadrature(jnp.asarray([[wavelength_nm]]), jnp.ones((1, 1)))
+    quadrature = Quadrature.monochromatic(wavelength_nm)
     plan = FramePlan(exposure_time, 1)
     unit_rates = detector_model.electrons(
-        PhotonRates(star_leakage=jnp.full((1, 1), flux)), quadrature
+        PhotonRates(quadrature, star_leakage=jnp.full((1, 1), flux))
     )
     unit_total = unit_rates.total()
     scale = (unit_total * plan.live_time_s)[0]
     background, _ = detector_model.mean_and_variance(
-        ElectronRates(thermal=jnp.zeros_like(unit_total)), plan
+        ElectronRates(quadrature.bands), plan
     )
 
     @eqx.filter_jit
     def detector(image, key):
         photons = PhotonRates(
-            star_leakage=jnp.maximum(image / reference_peak, 0.0)[None, None] * flux
+            quadrature,
+            star_leakage=jnp.maximum(image / reference_peak, 0.0)[None, None] * flux,
         )
-        rates = detector_model.electrons(photons, quadrature)
+        rates = detector_model.electrons(photons)
         counts = detector_model.draw(key, rates, plan)[0] - background[0]
         return reference_peak * counts / scale
 

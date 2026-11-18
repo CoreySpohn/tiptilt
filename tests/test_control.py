@@ -6,7 +6,7 @@ import numpy as np
 import pytest
 from hwoutils.constants import nm2m
 from hwoutils.grids import Frame, PixelGrid
-from hwoutils.spectral import Band
+from hwoutils.spectral import Band, Quadrature
 from physicaloptix import (
     Field,
     Fraunhofer,
@@ -15,7 +15,6 @@ from physicaloptix import (
     OpticalPath,
     PhaseScreen,
     PlaneKind,
-    Spectrum,
     Stage,
     broadcast_to_spectrum,
     fourier_dm_basis,
@@ -181,7 +180,7 @@ class TestTwoDeformableMirrors:
         contrast-vs-bandwidth tradeoff, not a DOF or sensing limit)."""
         path, mono, mask = _relay_setup()
         field = broadcast_to_spectrum(
-            mono, Spectrum.from_band(Band(WL * 0.925, WL * 1.075), 3)
+            mono, Quadrature.build((Band(WL * 0.925, WL * 1.075),), order=3)
         )
         _, hist_two = close_dark_hole(
             path, field, (0, 2), mask, n_steps=30, gain=0.5, regularization=1e-7
@@ -505,7 +504,7 @@ class TestEstimatedTwoDeformableMirrors:
         floor set by the CHROMATIC tax (monochromatically the same mirrors dig far
         deeper; the oracle hits the same floor), all from probe images."""
         path, dm_basis, mono, model_mono, mask = _relay_estimated_setup()
-        spectrum = Spectrum.from_band(Band(WL * 0.925, WL * 1.075), 3)
+        spectrum = Quadrature.build((Band(WL * 0.925, WL * 1.075),), order=3)
         field = broadcast_to_spectrum(mono, spectrum)
         model = broadcast_to_spectrum(model_mono, spectrum)
         probes = probe_set(dm_basis, amplitude_nm=2.0, n_probes=4)
@@ -545,7 +544,7 @@ class TestEstimatedTwoDeformableMirrors:
         one probe pair per step, per sub-band (the per-(wavelength, pixel) state
         accumulates rank over time), digging the band contrast from probe images."""
         path, dm_basis, mono, model_mono, mask = _relay_estimated_setup()
-        spectrum = Spectrum.from_band(Band(WL * 0.925, WL * 1.075), 3)
+        spectrum = Quadrature.build((Band(WL * 0.925, WL * 1.075),), order=3)
         field = broadcast_to_spectrum(mono, spectrum)
         model = broadcast_to_spectrum(model_mono, spectrum)
         probes = probe_set(dm_basis, amplitude_nm=2.0, n_probes=3)
@@ -704,7 +703,7 @@ class TestPixelWeights:
         rng = np.random.default_rng(0)
         pixel = jnp.asarray(rng.uniform(0.1, 2.0, n_dz))
         band = broadcast_to_spectrum(
-            field, Spectrum.from_band(Band(WL * 0.95, WL * 1.05), 3)
+            field, Quadrature.build((Band(WL * 0.95, WL * 1.05),), order=3)
         )
 
         model = DarkZoneModel.build(

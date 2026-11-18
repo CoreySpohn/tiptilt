@@ -181,6 +181,7 @@ class TestHwoSimSpeckleField:
     def test_realize_is_the_linear_model_excess_on_the_dark_zone(self, delivery, grid):
         dark_zone, _ = grid
         field = _field(delivery, **_tabulated())
+        np.testing.assert_array_equal(field.spectral_breaks_nm(), [525.0, 575.0])
         image = field.realize(wavelength_nm=552.0, time_d=100.0 * s2d)
         assert image.grid == delivery["grid"]
         assert (image.measure, image.quantity) == ("per_pixel", "stellar_flux_fraction")

@@ -400,6 +400,11 @@ class HwoSimSpeckleField(AbstractSpeckleField):
         interp = jax.vmap(lambda column: jnp.interp(t, self.drift_time_s, column))
         return interp(flat.T).reshape(table.shape[1], table.shape[2])
 
+    def spectral_breaks_nm(self) -> np.ndarray:
+        """Nearest-plane selection changes midway between sorted wavelengths."""
+        planes = np.unique(np.asarray(self.wavelengths_nm, dtype=float))
+        return planes[:-1] + np.diff(planes) / 2
+
     def _wavelength_index(self, wavelength_nm: ArrayLike) -> Array:
         return jnp.argmin(jnp.abs(self.wavelengths_nm - jnp.asarray(wavelength_nm)))
 

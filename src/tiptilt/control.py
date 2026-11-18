@@ -52,7 +52,7 @@ class DarkZoneModel(eqx.Module):
         indices: DM stage indices, in command-stacking order.
         split_points: Cumulative mode counts carving the stacked command.
         mask: Boolean dark-zone mask.
-        weights: Spectrum weights (ones for a monochromatic field).
+        weights: Unit-sum wavelength weights (ones for a monochromatic field).
         sqrt_weights: Their square roots.
         pixel_weights: Per-dark-zone-pixel weights (ones when uniform).
         stack_weights: Per-(wavelength, pixel) sqrt weights, stacked.
@@ -180,7 +180,9 @@ class DarkZoneModel(eqx.Module):
             split_points.append(running)
 
         spectrum = jacobian_field.spectrum
-        weights = jnp.ones(1) if spectrum is None else spectrum.weights
+        weights = jnp.ones(1)
+        if spectrum is not None and spectrum.bands[0].width_nm > 0:
+            weights = spectrum.weights_nm[0] / spectrum.bands[0].width_nm
         sqrt_weights = jnp.sqrt(weights)
         n_dark = int(jnp.sum(mask))
         if pixel_weights is None:
