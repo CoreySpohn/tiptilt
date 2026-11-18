@@ -5,7 +5,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 from hwoutils.constants import s2d
-from hwoutils.grids import Frame, PixelGrid
+from hwoutils.grids import Frame, Measure, PixelGrid
 from optixstuff import FocalResponse
 
 from tiptilt.speckle import (
@@ -439,7 +439,8 @@ def test_shared_law_matches_density_parent_formula(ingredients):
         image.data, parent, rtol=0, atol=32 * np.finfo(float).eps * np.max(abs(parent))
     )
     assert image.grid == field.grid
-    assert (image.measure, image.quantity) == ("per_pixel", "stellar_flux_fraction")
+    assert image.measure == Measure.integral()
+    assert image.quantity == "stellar_flux_fraction"
 
 
 def test_tabulated_clock_origin_and_seconds(ingredients):

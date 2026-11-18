@@ -42,7 +42,7 @@ import jax.numpy as jnp
 import numpy as np
 from astropy.io import fits
 from hwoutils.constants import d2s
-from hwoutils.grids import Frame, Image, PixelGrid
+from hwoutils.grids import Frame, Image, Measure, PixelGrid
 from jax.typing import ArrayLike
 from jaxtyping import Array
 from optixstuff.speckle import AbstractSpeckleField
@@ -610,6 +610,6 @@ class HwoSimSpeckleField(AbstractSpeckleField):
             self._scatter(delta.real) * self.contrast_to_flux_fraction,
             self.grid,
             (),
-            "per_pixel",
+            Measure.integral(),
             "stellar_flux_fraction",
         )

@@ -6,7 +6,7 @@ import numpy as np
 import pytest
 from astropy.io import fits
 from hwoutils.constants import s2d
-from hwoutils.grids import Frame
+from hwoutils.grids import Frame, Measure
 from optixstuff.speckle import AbstractSpeckleField
 
 from tiptilt.hwo_sim import HwoSimSpeckleField, load_hwo_sim, segment_zernike_series
@@ -184,7 +184,8 @@ class TestHwoSimSpeckleField:
         np.testing.assert_array_equal(field.spectral_breaks_nm(), [525.0, 575.0])
         image = field.realize(wavelength_nm=552.0, time_d=100.0 * s2d)
         assert image.grid == delivery["grid"]
-        assert (image.measure, image.quantity) == ("per_pixel", "stellar_flux_fraction")
+        assert image.measure == Measure.integral()
+        assert image.quantity == "stellar_flux_fraction"
         out = np.asarray(image.data)
         e = delivery["E0"][1]
         g = delivery["G"][1].reshape(e.size, -1)
