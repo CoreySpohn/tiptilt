@@ -25,7 +25,7 @@ from dataclasses import field as dataclass_field
 import jax.numpy as jnp
 import numpy as np
 from hwoutils.constants import d2s, nm2m
-from hwoutils.grids import Frame, PixelGrid
+from optixstuff.grids import Frame, PixelGrid
 from physicaloptix import (
     BeamSplitter,
     Branch,

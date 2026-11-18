@@ -24,8 +24,8 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 from hwoutils.constants import s2d
-from hwoutils.spectral import Quadrature
 from optixstuff import ElectronRates, FocalResponse, FramePlan, PhotonRates
+from optixstuff.spectral import Quadrature
 from physicaloptix import PhaseScreen
 
 from tiptilt.control import DarkZoneModel, EFCController

@@ -3,7 +3,7 @@
 import jax
 import jax.numpy as jnp
 import numpy as np
-from hwoutils.grids import Frame, PixelGrid
+from optixstuff.grids import Frame, PixelGrid
 from physicaloptix import (
     Field,
     Fraunhofer,

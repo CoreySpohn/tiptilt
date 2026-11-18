@@ -2,7 +2,7 @@
 
 import jax.numpy as jnp
 import numpy as np
-from hwoutils.grids import PixelGrid
+from optixstuff.grids import PixelGrid
 from physicaloptix import Field, PlaneKind, ZernikeWavefrontSensor, zernike_basis
 from physicaloptix.elements.basis import ModeBasis
 

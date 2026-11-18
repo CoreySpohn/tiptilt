@@ -46,9 +46,9 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from hwoutils.constants import d2s
-from hwoutils.spectral import trapezoid_weights
 from jaxtyping import Array
 from optixstuff import FocalResponse, LinearSpeckleField
+from optixstuff.spectral import trapezoid_weights
 from physicaloptix import AnalyticSpeckleField
 
 # Below this effective frequency count a single frozen realization's modal

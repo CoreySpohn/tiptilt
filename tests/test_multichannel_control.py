@@ -3,7 +3,7 @@
 import jax.numpy as jnp
 import numpy as np
 import pytest
-from hwoutils.grids import Frame, PixelGrid
+from optixstuff.grids import Frame, PixelGrid
 from physicaloptix import (
     BeamSplitter,
     Branch,

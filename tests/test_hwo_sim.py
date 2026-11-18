@@ -6,7 +6,7 @@ import numpy as np
 import pytest
 from astropy.io import fits
 from hwoutils.constants import s2d
-from hwoutils.grids import Frame, Measure
+from optixstuff.grids import Frame, Measure
 from optixstuff.speckle import AbstractSpeckleField
 
 from tiptilt.hwo_sim import HwoSimSpeckleField, load_hwo_sim, segment_zernike_series

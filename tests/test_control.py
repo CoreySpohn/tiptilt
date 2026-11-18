@@ -5,8 +5,8 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 from hwoutils.constants import nm2m
-from hwoutils.grids import Frame, PixelGrid
-from hwoutils.spectral import Band, Quadrature
+from optixstuff.grids import Frame, PixelGrid
+from optixstuff.spectral import Band, Quadrature
 from physicaloptix import (
     Field,
     Fraunhofer,

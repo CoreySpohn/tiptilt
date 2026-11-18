@@ -42,9 +42,9 @@ import jax.numpy as jnp
 import numpy as np
 from astropy.io import fits
 from hwoutils.constants import d2s
-from hwoutils.grids import Frame, Image, Measure, PixelGrid
 from jax.typing import ArrayLike
 from jaxtyping import Array
+from optixstuff.grids import Frame, Image, Measure, PixelGrid
 from optixstuff.speckle import AbstractSpeckleField
 
 

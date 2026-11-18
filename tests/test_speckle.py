@@ -5,8 +5,8 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 from hwoutils.constants import s2d
-from hwoutils.grids import Frame, Measure, PixelGrid
 from optixstuff import FocalResponse
+from optixstuff.grids import Frame, Measure, PixelGrid
 
 from tiptilt.speckle import (
     TabulatedSpeckleField,

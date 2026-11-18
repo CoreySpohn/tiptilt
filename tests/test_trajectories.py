@@ -13,8 +13,8 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 from hwoutils.constants import s2d
-from hwoutils.grids import Frame, PixelGrid
 from optixstuff import FocalResponse
+from optixstuff.grids import Frame, PixelGrid
 from physicaloptix.speckle import ou_exposure_neff
 
 from tiptilt.speckle import (

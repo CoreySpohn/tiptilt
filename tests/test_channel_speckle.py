@@ -5,8 +5,8 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 from hwoutils.constants import s2d
-from hwoutils.grids import Frame, PixelGrid
 from optixstuff import FocalResponse
+from optixstuff.grids import Frame, PixelGrid
 from physicaloptix import ChannelLinearization, MultiChannelLinearization
 
 from tiptilt.speckle import TabulatedSpeckleField, correlated_channel_fields

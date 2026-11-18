@@ -4,7 +4,7 @@ import equinox as eqx
 import jax.numpy as jnp
 import numpy as np
 from hwoutils.constants import d2s, s2d
-from hwoutils.grids import Frame, PixelGrid
+from optixstuff.grids import Frame, PixelGrid
 from optixstuff.speckle import AbstractSpeckleField
 from physicaloptix import (
     Field,
