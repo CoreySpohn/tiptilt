@@ -182,7 +182,7 @@ class DarkZoneModel(eqx.Module):
         spectrum = jacobian_field.spectrum
         weights = jnp.ones(1)
         if spectrum is not None and spectrum.bands[0].width_nm > 0:
-            weights = spectrum.weights_nm[0] / spectrum.bands[0].width_nm
+            weights = spectrum.weights()[0] / spectrum.bands[0].width_nm
         sqrt_weights = jnp.sqrt(weights)
         n_dark = int(jnp.sum(mask))
         if pixel_weights is None:
