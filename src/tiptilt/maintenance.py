@@ -24,7 +24,7 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 from hwoutils.constants import s2d
-from optixstuff import ElectronRates, FocalResponse, FramePlan, PhotonRates
+from optixstuff import FocalResponse, FramePlan, Rates
 from optixstuff.spectral import Quadrature
 from physicaloptix import PhaseScreen
 
@@ -64,18 +64,19 @@ def make_detector(
     quadrature = Quadrature.monochromatic(wavelength_nm)
     plan = FramePlan(exposure_time, 1)
     unit_rates = detector_model.electrons(
-        PhotonRates(quadrature, star_leakage=jnp.full((1, 1), flux))
+        Rates(quadrature, "photon", star_leakage=jnp.full((1, 1), flux))
     )
     unit_total = unit_rates.total()
     scale = (unit_total * plan.live_time_s)[0]
     background, _ = detector_model.mean_and_variance(
-        ElectronRates(quadrature.bands), plan
+        Rates(quadrature.bands, "electron"), plan
     )
 
     @eqx.filter_jit
     def detector(image, key):
-        photons = PhotonRates(
+        photons = Rates(
             quadrature,
+            "photon",
             star_leakage=jnp.maximum(image / reference_peak, 0.0)[None, None] * flux,
         )
         rates = detector_model.electrons(photons)
