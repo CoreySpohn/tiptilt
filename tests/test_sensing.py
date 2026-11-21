@@ -173,7 +173,9 @@ class TestEstimateFieldThroughPath:
         )
         e_in = self._aberrated_input(aperture, xg, yg, wl)
         input_field = Field(data=jnp.asarray(e_in), grid=pupil, plane=PlaneKind.PUPIL)
-        mask = dark_zone_mask(focal, iwa_lod=2.0, owa_lod=7.0)
+        mask = dark_zone_mask(
+            focal, inner_working_angle_lod=2.0, outer_working_angle_lod=7.0
+        )
         out, _ = path.propagate(input_field)
         return path, dm_basis, input_field, model_field, mask, out.data
 
