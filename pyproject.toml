@@ -24,9 +24,9 @@ dependencies = [
     "jaxlib>=0.8.1",
     "jaxtyping>=0.2.36",
     "numpy>=2.0",
-    "optixstuff>=4.0.0",
-    "hwoutils[jax]>=1.10.0",
-    "physicaloptix>=3.0.0",
+    "optixstuff>=7.0.0",  # unreleased: next release, see .github/sibling-pins.txt
+    "hwoutils[jax]>=2.0.0",
+    "physicaloptix>=4.0.0",  # unreleased: next release
 ]
 
 [project.optional-dependencies]
@@ -41,7 +41,7 @@ test = [
     "pytest-markdown-docs>=0.5.0",
     "pytest-timeout>=1.3.1",
     "pytest-fail-slow>=0.1.0",
-    "hwoutils[jax]>=1.10.0",
+    "hwoutils[jax]>=2.0.0",
 ]
 docs = [
     "sphinx>=7.2.6",
