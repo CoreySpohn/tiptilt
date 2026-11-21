@@ -50,6 +50,10 @@ the mode basis, and the residual interface.
 - **Sensing** (`sensing`): pairwise probe estimation, Zernike wavefront
   sensor calibration and reconstruction, and Kalman field estimators behind
   a common `AbstractEstimator` seam.
+- **Pointing** (`lowfs`): `lowfs_calibrate` builds the response matrix of a
+  defocused low-order sensor on a forked pickoff arm, and `run_pointing_loop`
+  closes an integrator on the reconstructed coefficients to hold the beam
+  against line-of-sight jitter (the `pointing_jitter` testbed scenario).
 - **Control** (`control`): electric-field conjugation, stroke minimization,
   and a predictive law behind a common `AbstractController` seam, with
   `close_dark_hole` as the driver.

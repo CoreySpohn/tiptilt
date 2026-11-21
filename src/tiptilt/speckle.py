@@ -485,7 +485,10 @@ class TabulatedSpeckleField(LinearSpeckleField):
             )
 
     def coefficients(self, time_d):
-        """Interpolate at scene days, returning (*time_shape, n_modes)."""
+        """Interpolate at scene days.
+
+        Returns an array of shape ``time_shape + (n_modes,)``.
+        """
         elapsed_s = (jnp.asarray(time_d, dtype=float) - self.epoch_d) * d2s
         return jax.vmap(
             lambda column: jnp.interp(elapsed_s, self.times_s, column),
