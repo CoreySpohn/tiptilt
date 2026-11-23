@@ -441,6 +441,8 @@ def test_shared_law_matches_density_parent_formula(ingredients):
     assert image.grid == field.grid
     assert image.measure == Measure.integral()
     assert image.quantity == "stellar_flux_fraction"
+    # A tabulated field holds data in every cell of its grid.
+    assert field.data_mask() is None
 
 
 def test_tabulated_clock_origin_and_seconds(ingredients):

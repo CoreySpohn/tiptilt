@@ -16,8 +16,8 @@ model as an ``optixstuff.AbstractSpeckleField``. The field differs from
 ``TabulatedSpeckleField`` where the format does:
 
 - The fields live on the dark-zone pixel list and are scattered onto the full
-  grid on output, so the field is zero outside the dark zone, where the format
-  carries nothing.
+  grid on output. There is no data outside the dark zone; the array holds 0.0
+  there and ``data_mask`` is False.
 - hwo_sim normalizes by the peak of the unocculted image, so ``|E|^2`` is
   peak-referenced contrast. One scalar, ``contrast_to_flux_fraction``, takes it
   to the flux fraction per pixel the contract asks for.
@@ -211,7 +211,8 @@ class HwoSimSpeckleField(AbstractSpeckleField):
     Evaluates ``I(t) = |E_nom + G eps(t)|^2`` on the dark-zone pixel list and
     returns the excess over the static floor, per the speckle contract, as
     flux fraction per pixel: ``|E_nom + G eps|^2 - |E_nom|^2`` times
-    ``contrast_to_flux_fraction``, zero outside the dark zone.
+    ``contrast_to_flux_fraction``. There is no data outside the dark zone; the
+    array holds 0.0 there and :meth:`data_mask` is False.
 
     Wavelength handling is nearest-neighbor over the stored planes.
     Interpolating a complex field across a broad band would wrap phase
@@ -412,6 +413,17 @@ class HwoSimSpeckleField(AbstractSpeckleField):
         flat = jnp.zeros(self.grid_shape[0] * self.grid_shape[1], dtype=values.dtype)
         return flat.at[self.dark_zone_index].set(values).reshape(self.grid_shape)
 
+    def data_mask(self) -> Array:
+        """The dark zone on ``grid``: True where the delivery holds data.
+
+        The field is known on the dark-zone pixel list only, whatever the size
+        of its array, so a consumer's support ends at the list.
+
+        Returns:
+            Boolean of shape ``grid.shape``, True on the dark-zone pixels.
+        """
+        return self._scatter(jnp.ones(self.dark_zone_index.shape, dtype=bool))
+
     def static_contrast(self, wavelength_nm: ArrayLike) -> Array:
         """Static coronagraphic floor ``|E_nom|^2`` as peak-referenced contrast."""
         index = self._wavelength_index(wavelength_nm)
@@ -599,7 +611,8 @@ class HwoSimSpeckleField(AbstractSpeckleField):
         """Wavefront-error-induced excess over the static floor.
 
         Returns ``|E_nom + G eps(t)|^2 - |E_nom|^2`` as flux fraction per
-        pixel, zero outside the dark zone.
+        pixel. There is no data outside the dark zone; the array holds 0.0
+        there and :meth:`data_mask` is False.
         """
         index = self._wavelength_index(wavelength_nm)
         e_nom = jnp.take(self.e_nom, index, axis=0)

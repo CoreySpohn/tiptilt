@@ -194,6 +194,11 @@ class TestHwoSimSpeckleField:
         expected[dark_zone] = (np.abs(e + de) ** 2 - np.abs(e) ** 2) * SCALE
         np.testing.assert_allclose(out, expected, rtol=1e-9, atol=1e-30)
         assert np.all(out[~dark_zone] == 0.0)
+        # The data mask is the delivery's own dark zone, not the array: a field
+        # that reported its array would let a consumer support the zero fill.
+        mask = np.asarray(field.data_mask())
+        assert mask.dtype == bool and mask.shape == image.grid.shape
+        np.testing.assert_array_equal(mask, dark_zone)
 
     def test_decomposition_sums_to_realize(self, delivery):
         field = _field(delivery, **_sinusoid())
