@@ -190,32 +190,44 @@ class TestDarkZoneModelOperatingPoint:
         )
 
 
-def _hwo_sim_field():
+def _hwo_sim_field(cast, sinusoid=False):
     dark_zone = np.zeros((4, 4), bool)
     dark_zone[1, :3] = True
+    if sinusoid:
+        drift = {
+            "amplitude": cast(np.ones((1, 2, 1))),
+            "frequency_hz": cast(np.full((1, 2, 1), 1e-3)),
+            "phase": cast(np.zeros((1, 2, 1))),
+        }
+    else:
+        drift = {
+            "drift_time_s": cast([0.0, 10.0]),
+            "drift_coefficients": cast(np.zeros((2, 1, 2))),
+        }
     return HwoSimSpeckleField(
         np.ones((1, 3), complex),
         np.ones((1, 3, 2), complex),
         dark_zone,
-        wavelengths_nm=[500.0],
+        wavelengths_nm=cast([500.0]),
         grid=PixelGrid.focal(4, 0.25, Frame(500.0, 1.0, "circumscribed")),
         epoch_d=60000.5,
-        contrast_to_flux_fraction=7e-3,
-        drift_time_s=[0.0, 10.0],
-        drift_coefficients=np.zeros((2, 1, 2)),
+        contrast_to_flux_fraction=cast(7e-3),
+        **drift,
     )
 
 
-def _tabulated_field():
+def _tabulated_field(cast):
     grid = PixelGrid.focal(4, 0.25, Frame(500.0, 1.0, "circumscribed"))
     response = FocalResponse(
         np.ones((4, 4), complex), np.ones((2, 4, 4), complex), grid, 1.0, 500.0
     )
-    return TabulatedSpeckleField(response, [0.0, 10.0, 20.0], np.zeros((3, 2)))
+    return TabulatedSpeckleField(
+        response, cast([0.0, 10.0, 20.0]), cast(np.zeros((3, 2)))
+    )
 
 
-def _efc():
-    return EFCController(jnp.zeros((2, 2)), jnp.ones(2), 0.5)
+def _efc(cast):
+    return EFCController(jnp.zeros((2, 2)), jnp.ones(2), cast(0.5))
 
 
 def _z2():
@@ -225,40 +237,62 @@ def _z2():
 _LEAF_CASES = {
     "efc": (_efc, ["gain"]),
     "stroke": (
-        lambda: StrokeMinController(
-            _z2(), _z2(), jnp.ones(2), 1, jnp.ones(3), 1e-8, 0.7
+        lambda cast: StrokeMinController(
+            _z2(), _z2(), jnp.ones(2), 1, jnp.ones(3), cast(1e-8), cast(0.7)
         ),
         ["target_contrast", "gain"],
     ),
     "matrix_free": (
-        lambda: MatrixFreeEFCController(None, None, jnp.zeros(2), 0.5, 1e-6, 10, 1e-6),
+        lambda cast: MatrixFreeEFCController(
+            None, None, jnp.zeros(2), cast(0.5), 1e-6, 10, 1e-6
+        ),
         ["gain"],
     ),
-    "feed_forward": (lambda: FeedForwardController(_z2(), 0.5), ["gain"]),
+    "feed_forward": (lambda cast: FeedForwardController(_z2(), cast(0.5)), ["gain"]),
     "predictive": (
-        lambda: PredictiveController(_efc(), jnp.zeros(2), 1.0, jnp.asarray(False)),
+        lambda cast: PredictiveController(
+            _efc(cast), jnp.zeros(2), cast(1.0), jnp.asarray(False)
+        ),
         ["alpha"],
     ),
     "kalman": (
-        lambda: KalmanEstimator(None, (), 0, jnp.zeros(2), None, None, 0),
+        lambda cast: KalmanEstimator(None, (), 0, jnp.zeros(2), None, None, 0),
         ["step_index"],
     ),
-    "hwo_sim": (_hwo_sim_field, ["epoch_d", "contrast_to_flux_fraction"]),
-    "tabulated": (_tabulated_field, ["times_s"]),
+    "hwo_sim": (
+        _hwo_sim_field,
+        [
+            "contrast_to_flux_fraction",
+            "wavelengths_nm",
+            "drift_time_s",
+            "drift_coefficients",
+        ],
+    ),
+    "hwo_sim_sinusoid": (
+        lambda cast: _hwo_sim_field(cast, sinusoid=True),
+        ["amplitude", "frequency_hz", "phase"],
+    ),
+    "tabulated": (_tabulated_field, ["times_s", "eps_table"]),
 }
 
 
+@pytest.mark.parametrize(
+    ("x64", "source"), [(False, np.float64), (True, np.float32)], ids=["x32", "x64"]
+)
 @pytest.mark.parametrize("case", _LEAF_CASES)
-def test_converted_fields_are_strong_leaves_under_x32(case):
-    """A Python number or NumPy value given at construction is stored as a
-    strongly typed array of the active dtype (float32, or int32 for the probe
-    counter). Truth source: the leaf rule; no tolerance, dtypes are exact."""
+def test_converted_fields_are_strong_leaves(case, x64, source):
+    """A NumPy value given at construction is stored as a strongly typed array
+    of the active dtype (float32 under x32, float64 under x64, int32 for the
+    probe counter under x32), whatever its own float width. Truth source: the
+    leaf rule; no tolerance, dtypes are exact."""
     build, names = _LEAF_CASES[case]
-    with jax.enable_x64(False):
-        module = build()
+    with jax.enable_x64(x64):
+        module = build(lambda value: np.asarray(value, dtype=source))
+        active = jnp.float64 if x64 else jnp.float32
         for name in names:
             leaf = getattr(module, name)
-            expected = jnp.int32 if name == "step_index" else jnp.float32
+            integer = jax.dtypes.canonicalize_dtype(int)
+            expected = integer if name == "step_index" else active
             assert isinstance(leaf, jax.Array), name
             assert leaf.dtype == expected, name
             assert not leaf.weak_type, name

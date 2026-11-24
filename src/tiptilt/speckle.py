@@ -467,7 +467,7 @@ class TabulatedSpeckleField(LinearSpeckleField):
     """
 
     times_s: Array = eqx.field(converter=as_float_leaf)
-    eps_table: Array = eqx.field(converter=jnp.asarray)
+    eps_table: Array = eqx.field(converter=as_float_leaf)
 
     def __check_init__(self):
         """Require a nonempty ascending table with one column per mode."""
