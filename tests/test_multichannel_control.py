@@ -230,7 +230,90 @@ class TestRunMultichannel:
             )
 
 
+def _arm_model(*blocks):
+    return MultiChannelModel(
+        names=tuple(f"arm{i}" for i in range(len(blocks))),
+        g_blocks=tuple(jnp.asarray(block) for block in blocks),
+        e_refs=tuple(jnp.zeros(len(block), dtype=complex) for block in blocks),
+        masks=tuple(jnp.ones((1, len(block)), dtype=bool) for block in blocks),
+    )
+
+
 class TestFeedForwardController:
+    @pytest.mark.parametrize("weights", [[1, 2], [1, 1], [5, 0.1]])
+    def test_consistent_arms_cancel_at_any_weight(self, weights):
+        """Exact-algebra: both unit responses require -1 at every weight.
+
+        Scaling only the response changes the solution for unequal weights.
+        """
+        model = _arm_model([[1 + 0j]], [[1 + 0j]])
+        controller = FeedForwardController.build(
+            model, sense=model.names, gain=1, regularization=0, weights=weights
+        )
+        _, delta = controller.command_delta(jnp.ones(2, dtype=complex))
+        np.testing.assert_allclose(delta, [-1], atol=1e-12, rtol=0)
+
+    @pytest.mark.parametrize(("weights", "expected"), [([1, 2], -3), ([0, 2], -4)])
+    def test_inconsistent_arms_use_weighted_mean(self, weights, expected):
+        """Exact-algebra: the unit-response fit is the weighted mean of 1 and 4.
+
+        Scaling both response and estimate squares the weights.
+        """
+        model = _arm_model([[1 + 0j]], [[1 + 0j]])
+        controller = FeedForwardController.build(
+            model, sense=model.names, gain=1, regularization=0, weights=weights
+        )
+        _, delta = controller.command_delta(jnp.asarray([1 + 0j, 4 + 0j]))
+        np.testing.assert_allclose(delta, [expected], atol=1e-12, rtol=0)
+
+    def test_regularized_weighted_normal_equations(self):
+        """NumPy float64 normal equations give a floating-point reference.
+
+        Scaling the regularizer by the arm weight sum changes the solution.
+        """
+        rng = np.random.default_rng(82)
+        sizes = (2, 3, 4)
+        blocks = [rng.normal(size=(n, 2)) + 1j * rng.normal(size=(n, 2)) for n in sizes]
+        weights = rng.uniform(0.2, 2, len(sizes))
+        estimate = rng.normal(size=sum(sizes)) + 1j * rng.normal(size=sum(sizes))
+        g = np.vstack(blocks)
+        h = np.vstack((g.real, g.imag))
+        w = np.diag(np.tile(np.repeat(weights, sizes), 2))
+        z = np.concatenate((estimate.real, estimate.imag))
+        gram = h.T @ w @ h
+        reg = np.mean(np.diag(gram))
+        gain = 0.7
+        expected = -gain * np.linalg.solve(gram + reg * np.eye(2), h.T @ w @ z)
+
+        model = _arm_model(*blocks)
+        controller = FeedForwardController.build(
+            model, sense=model.names, gain=gain, regularization=reg, weights=weights
+        )
+        _, delta = controller.command_delta(jnp.asarray(estimate))
+        np.testing.assert_allclose(delta, expected, rtol=1e-10, atol=0)
+
+    @pytest.mark.parametrize(
+        ("weights", "message"),
+        [
+            ([-1, 2], "nonnegative"),
+            ([np.nan, 1], "finite"),
+            ([1, np.inf], "finite"),
+            ([0, 0], "positive"),
+            ([1, 2, 3], "weights must have shape"),
+            ([[1], [2]], "weights must have shape"),
+        ],
+    )
+    def test_rejects_invalid_arm_weights(self, weights, message):
+        """Mutation: the statistical-weight domain requires each validation error.
+
+        Omitting the corresponding check admits an invalid vector to the solve.
+        """
+        model = _arm_model([[1 + 0j]], [[1 + 0j]])
+        with pytest.raises(ValueError, match=message):
+            FeedForwardController.build(
+                model, sense=model.names, gain=1, regularization=1, weights=weights
+            )
+
     def test_command_delta_is_minus_gain_times_estimate(self):
         system, field, masks = _system()
         mcl = linearize_shared(

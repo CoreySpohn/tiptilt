@@ -26,6 +26,7 @@ The machinery is three pieces on the existing seams:
 
 import equinox as eqx
 import jax.numpy as jnp
+import numpy as np
 from hwoutils.leaves import as_float_leaf
 from jaxtyping import Array
 from physicaloptix import PhaseScreen, linearize_shared
@@ -131,10 +132,10 @@ def shared_dm_command(model, sense, e_hat, *, regularization, gain=1.0):
 class FeedForwardController(AbstractController):
     """Cross-channel feed-forward: sensed fields in, a shared command out.
 
-    Stacks the sensing arms' shared blocks (weighted) into one real least
-    squares whose solution is the shared-mode estimate; the delta is its
-    negation times the gain. Because the sensing arms' PRIVATE errors are
-    indistinguishable from shared drift in this solve, they are injected
+    Stacks the sensing arms' shared blocks into one real least-squares fit,
+    weighting each arm's squared residual by its inverse variance. The delta
+    is the negated shared-mode estimate times the gain. Because the arms' private
+    errors are indistinguishable from shared drift in this solve, they are injected
     into every corrected arm -- measure it with the aliasing scenario before
     trusting a feed-forward loop.
 
@@ -156,20 +157,36 @@ class FeedForwardController(AbstractController):
                 concatenated in this order).
             gain: Loop gain.
             regularization: Tikhonov term of the modal solve.
-            weights: Optional per-arm weights (equal by default).
+            weights: Inverse variances of the arms' estimates (ones by default),
+                up to a common factor that has no effect without regularization.
 
         Returns:
             A ``FeedForwardController``.
+
+        Raises:
+            ValueError: If the weights are not a vector of one finite,
+                nonnegative weight per sensing arm with positive total weight.
         """
         sense = tuple(sense)
-        if weights is None:
-            weights = jnp.ones(len(sense))
-        weights = jnp.asarray(weights)
-        blocks = [weights[i] * model.g_block(name) for i, name in enumerate(sense)]
+        weights = np.ones(len(sense)) if weights is None else np.asarray(weights)
+        if weights.shape != (len(sense),):
+            raise ValueError(
+                f"weights must have shape ({len(sense)},), got {weights.shape}"
+            )
+        if not np.all(np.isfinite(weights)):
+            raise ValueError("weights must be finite")
+        if np.any(weights < 0):
+            raise ValueError("weights must be nonnegative")
+        if not np.any(weights > 0):
+            raise ValueError("weights must have a positive sum")
+
+        blocks = [model.g_block(name) for name in sense]
         g = jnp.concatenate(blocks, axis=0)  # (n_stacked, m)
         h = jnp.concatenate([jnp.real(g), jnp.imag(g)], axis=0)
-        gram = h.T @ h + regularization * jnp.eye(h.shape[1])
-        solve_matrix = jnp.linalg.solve(gram, h.T)
+        pixel_weights = np.repeat(weights, [block.shape[0] for block in blocks])
+        ht_w = h.T * jnp.tile(jnp.asarray(pixel_weights), 2)
+        gram = ht_w @ h + regularization * jnp.eye(h.shape[1])
+        solve_matrix = jnp.linalg.solve(gram, ht_w)
         return cls(solve_matrix=solve_matrix, gain=gain)
 
     def command_delta(self, estimate):
@@ -225,7 +242,9 @@ def run_multichannel(
         regularization: Tikhonov term of the modal solve.
         local_drift: Optional dict mapping a branch name to
             ``(stage_name, table)`` -- that branch's private drift.
-        weights: Optional per-sensing-arm weights.
+        weights: Inverse variances of the sensing arms' estimates, in ``sense``
+            order (ones by default). A common scale has no effect without
+            regularization.
         substeps: Sense-and-correct iterations per drift frame.
 
     Returns:
