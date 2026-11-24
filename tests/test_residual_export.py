@@ -134,7 +134,7 @@ def test_realized_field_matches_direct_propagation():
         direct = jnp.abs(out.data) ** 2 * out.grid.pixel_area / norm
         linear = (
             jnp.abs(residual.response.e_nom) ** 2 * residual.grid.pixel_area / norm
-            + residual.realize(wavelength_nm=WL, time_d=(k * COMMON["dt_s"]) * s2d).data
+            + residual.realize(wavelength_nm=WL, elapsed_s=k * COMMON["dt_s"]).data
         )
         err = jnp.linalg.norm(linear - direct) / jnp.linalg.norm(direct)
         assert float(err) < 1e-3, f"frame {k}: rel err {float(err):.2e}"
@@ -149,8 +149,8 @@ def test_seam_contract_and_closed_beats_open():
     opened, _ = maintained_residual_field(path, field, 1, mask, **kwargs, **open_kwargs)
     assert isinstance(closed, AbstractSpeckleField)
     late = (COMMON["n_steps"] - 1) * COMMON["dt_s"]
-    d_closed = closed.realize(wavelength_nm=WL, time_d=(late) * s2d).data
-    d_open = opened.realize(wavelength_nm=WL, time_d=(late) * s2d).data
+    d_closed = closed.realize(wavelength_nm=WL, elapsed_s=late).data
+    d_open = opened.realize(wavelength_nm=WL, elapsed_s=late).data
     assert d_closed.shape == d_open.shape and bool(jnp.all(jnp.isfinite(d_closed)))
     # the seam carries the controller conditioning: closed-loop residual
     # energy in the hole is far below open loop

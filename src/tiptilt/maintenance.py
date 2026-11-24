@@ -9,8 +9,9 @@ threads the same ``AbstractEstimator`` / ``AbstractController`` seams as
 
 - the drift is applied to a named wavefront-error ``PhaseScreen`` in the TRUE
   system each step (the controller's model never sees it -- honesty is
-  preserved by construction), sourced from a ``TabulatedSpeckleField.coefficients``
-  accessor or any ``callable(time_d) -> coefficients``;
+  preserved by construction), sourced from a ``TabulatedSpeckleField``
+  (read at scene days through its ``elapsed_s``) or any
+  ``callable(time_d) -> coefficients``;
 - the control Jacobian is linearized AT ``command0`` (the mirror is a true
   exponential, so the Jacobian rotates with the base point), the operating
   point a dig-from-cold loop does not have.
@@ -126,8 +127,9 @@ def maintain_dark_hole(
         input_field: The true entrance field.
         dm_indices: DM stage index or tuple of indices.
         dark_zone_mask: Boolean focal-plane dark-zone mask.
-        drift: A ``TabulatedSpeckleField`` (its ``coefficients`` accessor is used) or
-            any ``callable(time_d) -> coefficients`` for the drift screen.
+        drift: A ``TabulatedSpeckleField`` (its ``coefficients``, read at
+            ``elapsed_s(time_d)``) or any ``callable(time_d) -> coefficients``
+            for the drift screen.
         drift_stage: Stage index of the wavefront-error ``PhaseScreen`` that
             carries the drift.
         n_steps: Number of maintenance frames.
@@ -182,7 +184,7 @@ def maintain_dark_hole(
     jacobian_field = (
         model_field if (estimated and model_field is not None) else input_field
     )
-    eps_of = drift.coefficients if hasattr(drift, "coefficients") else drift
+    eps_of = _coefficients_of(drift)
 
     dz_model = DarkZoneModel.build(
         path,
@@ -248,6 +250,17 @@ def maintain_dark_hole(
     return command, jnp.stack(history)
 
 
+def _coefficients_of(drift):
+    """A ``callable(time_d) -> coefficients`` for a drift field or callable.
+
+    A field converts scene days on its own clock; the times here are host
+    floats, so the conversion is exact in either precision.
+    """
+    if hasattr(drift, "coefficients"):
+        return lambda time_d: drift.coefficients(elapsed_s=drift.elapsed_s(time_d))
+    return drift
+
+
 def maintained_residual_field(
     path,
     input_field,
@@ -290,8 +303,9 @@ def maintained_residual_field(
         input_field: The true entrance field.
         dm_indices: DM stage index or tuple of indices.
         dark_zone_mask: Boolean focal-plane dark-zone mask.
-        drift: A ``TabulatedSpeckleField`` (its ``coefficients``) or
-            ``callable(time_d) -> coefficients`` for the drift screen.
+        drift: A ``TabulatedSpeckleField`` (its ``coefficients``, read at
+            ``elapsed_s(time_d)``) or ``callable(time_d) -> coefficients`` for
+            the drift screen.
         drift_stage: Stage index of the drift-carrying ``PhaseScreen``.
         n_steps: Number of maintenance frames.
         dt_s: Seconds per frame.
@@ -329,7 +343,7 @@ def maintained_residual_field(
         jacobian_field=input_field,
         operating_point=command0,
     )
-    eps_of = drift.coefficients if hasattr(drift, "coefficients") else drift
+    eps_of = _coefficients_of(drift)
     optic = dz_model.path.stages[drift_stage].op
     n_drift = optic.command.size
     zero_drift = jnp.zeros(n_drift)

@@ -43,7 +43,6 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from astropy.io import fits
-from hwoutils.constants import d2s
 from hwoutils.leaves import as_float_leaf
 from jax.typing import ArrayLike
 from jaxtyping import Array
@@ -234,11 +233,12 @@ class HwoSimSpeckleField(AbstractSpeckleField):
     through its interpolation abscissa. :meth:`max_safe_elapsed_s` reports
     the limit for whichever form is loaded.
 
-    ``epoch_d`` is a static host binary64 float, so a field built at an
-    absolute epoch keeps it exactly. :meth:`coefficients` subtracts it from a
-    concrete ``time_d`` on the host, in binary64, before reducing precision;
-    a traced ``time_d`` is already in the active dtype, so pass relative times
-    or enable x64 when tracing absolute ones.
+    ``epoch_d`` is placement metadata, a static host binary64 float.
+    :meth:`coefficients`, :meth:`realize` and :meth:`decompose_delta` take
+    ``elapsed_s``, seconds since the clock origin, and do not read
+    ``epoch_d``. Convert scene time with ``elapsed_s(time_d)``, which refuses
+    a float32 time at a nonzero epoch. In float32 the drift is exact only
+    while ``elapsed_s`` stays under :meth:`max_safe_elapsed_s`.
     """
 
     grid: PixelGrid
@@ -385,8 +385,10 @@ class HwoSimSpeckleField(AbstractSpeckleField):
         """Whether the drift is a tabulated series rather than sinusoids."""
         return self.drift_coefficients is not None
 
-    def coefficients(self, time_d: ArrayLike) -> Array:
-        """Per-segment Zernike coefficients at scene time_d, in nm RMS wavefront.
+    def coefficients(self, *, elapsed_s: ArrayLike) -> Array:
+        """Per-segment Zernike coefficients at ``elapsed_s``, in nm RMS wavefront.
+
+        ``elapsed_s`` is seconds since the clock origin.
 
         Returns shape ``(num_seg, num_zern)``. For a sinusoid drift the
         per-mode components are summed here, so callers never see the
@@ -398,14 +400,7 @@ class HwoSimSpeckleField(AbstractSpeckleField):
         The branch is on ``None``-ness, which is PyTree structure rather than
         a traced value, so it resolves at trace time under ``jit``.
         """
-        if isinstance(time_d, jax.Array):
-            elapsed_d = jnp.asarray(time_d, dtype=float) - self.epoch_d
-        else:
-            # Subtract in binary64 on the host before reducing precision.
-            elapsed_d = jnp.asarray(
-                np.asarray(time_d, dtype=np.float64) - self.epoch_d, dtype=float
-            )
-        t = elapsed_d * d2s
+        t = jnp.asarray(elapsed_s, dtype=float)
         if self.drift_coefficients is None:
             wave = self.amplitude * jnp.cos(
                 2.0 * jnp.pi * self.frequency_hz * t + self.phase
@@ -601,7 +596,7 @@ class HwoSimSpeckleField(AbstractSpeckleField):
         return phase_tol_rad / (2.0 * np.pi * eps * f_max)
 
     def decompose_delta(
-        self, *, wavelength_nm: ArrayLike, time_d: ArrayLike = 0.0
+        self, *, wavelength_nm: ArrayLike, elapsed_s: ArrayLike = 0.0
     ) -> tuple[Array, Array]:
         """The two terms of the speckle delta, separately, as flux fractions.
 
@@ -615,7 +610,9 @@ class HwoSimSpeckleField(AbstractSpeckleField):
         index = self._wavelength_index(wavelength_nm)
         e_nom = jnp.take(self.e_nom, index, axis=0)
         gain = jnp.take(self.gain, index, axis=0)
-        delta_e = gain @ self.coefficients(time_d).ravel().astype(gain.dtype)
+        delta_e = gain @ self.coefficients(elapsed_s=elapsed_s).ravel().astype(
+            gain.dtype
+        )
         cross = 2.0 * jnp.real(jnp.conj(e_nom) * delta_e)
         quadratic = jnp.abs(delta_e) ** 2
         return (
@@ -627,7 +624,7 @@ class HwoSimSpeckleField(AbstractSpeckleField):
         self,
         *,
         wavelength_nm: ArrayLike,
-        time_d: ArrayLike = 0.0,
+        elapsed_s: ArrayLike = 0.0,
     ) -> Image:
         """Wavefront-error-induced excess over the static floor.
 
@@ -638,7 +635,9 @@ class HwoSimSpeckleField(AbstractSpeckleField):
         index = self._wavelength_index(wavelength_nm)
         e_nom = jnp.take(self.e_nom, index, axis=0)
         gain = jnp.take(self.gain, index, axis=0)
-        delta_e = gain @ self.coefficients(time_d).ravel().astype(gain.dtype)
+        delta_e = gain @ self.coefficients(elapsed_s=elapsed_s).ravel().astype(
+            gain.dtype
+        )
         delta = 2.0 * jnp.real(jnp.conj(e_nom) * delta_e) + jnp.abs(delta_e) ** 2
         return Image(
             self._scatter(delta.real) * self.contrast_to_flux_fraction,

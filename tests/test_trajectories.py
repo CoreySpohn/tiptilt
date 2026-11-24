@@ -12,7 +12,6 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-from hwoutils.constants import s2d
 from optixstuff import FocalResponse
 from optixstuff.grids import Frame, PixelGrid
 from physicaloptix.speckle import ou_exposure_neff
@@ -566,8 +565,8 @@ class TestFeedsATabulatedField:
             times,
             eps_table,
         )
-        early = field.realize(wavelength_nm=500.0, time_d=(0.0) * s2d).data
-        late = field.realize(wavelength_nm=500.0, time_d=(3000.0) * s2d).data
+        early = field.realize(wavelength_nm=500.0, elapsed_s=0.0).data
+        late = field.realize(wavelength_nm=500.0, elapsed_s=3000.0).data
         assert early.shape == (ny, nx)
         assert jnp.all(jnp.isfinite(late))
         assert not jnp.allclose(early, late)
@@ -758,7 +757,7 @@ class TestExposureAveragingOnARealField:
         got = field.realize_average(wavelength_nm=600.0, exposure_s=100.0, n_sub=4).data
         expected = (
             sum(
-                field.realize(wavelength_nm=600.0, time_d=(t) * s2d).data
+                field.realize(wavelength_nm=600.0, elapsed_s=t).data
                 for t in (12.5, 37.5, 62.5, 87.5)
             )
             / 4.0

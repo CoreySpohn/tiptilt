@@ -45,7 +45,6 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 import numpy as np
-from hwoutils.constants import d2s
 from hwoutils.leaves import as_float_leaf
 from jaxtyping import Array
 from optixstuff import FocalResponse, LinearSpeckleField
@@ -461,9 +460,9 @@ class TabulatedSpeckleField(LinearSpeckleField):
     """Replay modal trajectories through a monochromatic focal response.
 
     The inherited law includes interference with e_nom; a zero nominal
-    response produces a pure halo. Coefficients interpolate elapsed seconds
-    from epoch_d, holding endpoints outside the table. Public timestamps are
-    scene days.
+    response produces a pure halo. ``coefficients(*, elapsed_s)``
+    interpolates ``eps_table`` at ``elapsed_s`` on ``times_s`` (seconds since
+    the clock origin), holding the endpoints outside the table.
     """
 
     times_s: Array = eqx.field(converter=as_float_leaf)
@@ -485,14 +484,14 @@ class TabulatedSpeckleField(LinearSpeckleField):
                 f"G has {self.response.G.shape[0]} modes but eps_table has {n_modes}"
             )
 
-    def coefficients(self, time_d):
-        """Interpolate at scene days.
+    def coefficients(self, *, elapsed_s):
+        """Interpolate at ``elapsed_s`` seconds since the clock origin.
 
         Returns an array of shape ``time_shape + (n_modes,)``.
         """
-        elapsed_s = (jnp.asarray(time_d, dtype=float) - self.epoch_d) * d2s
+        t = jnp.asarray(elapsed_s, dtype=float)
         return jax.vmap(
-            lambda column: jnp.interp(elapsed_s, self.times_s, column),
+            lambda column: jnp.interp(t, self.times_s, column),
             in_axes=1,
             out_axes=-1,
         )(self.eps_table)

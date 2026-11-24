@@ -6,7 +6,6 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 from astropy.io import fits
-from hwoutils.constants import s2d
 from optixstuff.grids import Frame, Measure
 from optixstuff.speckle import AbstractSpeckleField
 
@@ -215,7 +214,7 @@ class TestHwoSimSpeckleField:
         dark_zone, _ = grid
         field = _field(delivery, **_tabulated())
         np.testing.assert_array_equal(field.spectral_breaks_nm(), [525.0, 575.0])
-        image = field.realize(wavelength_nm=552.0, time_d=100.0 * s2d)
+        image = field.realize(wavelength_nm=552.0, elapsed_s=100.0)
         assert image.grid == delivery["grid"]
         assert image.measure == Measure.integral()
         assert image.quantity == "stellar_flux_fraction"
@@ -235,8 +234,8 @@ class TestHwoSimSpeckleField:
 
     def test_decomposition_sums_to_realize(self, delivery):
         field = _field(delivery, **_sinusoid())
-        cross, quad = field.decompose_delta(wavelength_nm=500.0, time_d=(40.0) * s2d)
-        total = field.realize(wavelength_nm=500.0, time_d=(40.0) * s2d).data
+        cross, quad = field.decompose_delta(wavelength_nm=500.0, elapsed_s=40.0)
+        total = field.realize(wavelength_nm=500.0, elapsed_s=40.0).data
         np.testing.assert_allclose(np.asarray(cross + quad), np.asarray(total))
         assert np.all(np.asarray(quad) >= 0.0)
 
@@ -261,20 +260,22 @@ class TestHwoSimSpeckleField:
             ),
             axis=-1,
         )
-        np.testing.assert_allclose(np.asarray(field.coefficients((t) * s2d)), expected)
+        np.testing.assert_allclose(
+            np.asarray(field.coefficients(elapsed_s=t)), expected
+        )
 
     def test_tabulated_coefficients_interpolate_and_hold(self, delivery):
         drift = _tabulated()
         field = _field(delivery, **drift)
         table = np.asarray(drift["drift_coefficients"])
         np.testing.assert_allclose(
-            np.asarray(field.coefficients((200.0) * s2d)), 0.5 * (table[1] + table[2])
+            np.asarray(field.coefficients(elapsed_s=200.0)), 0.5 * (table[1] + table[2])
         )
         np.testing.assert_allclose(
-            np.asarray(field.coefficients((-50.0) * s2d)), table[0]
+            np.asarray(field.coefficients(elapsed_s=-50.0)), table[0]
         )
         np.testing.assert_allclose(
-            np.asarray(field.coefficients((1e4) * s2d)), table[2]
+            np.asarray(field.coefficients(elapsed_s=1e4)), table[2]
         )
         assert field.drift_is_tabulated
         assert field.num_mode == NUM_SEG * NUM_ZERN
@@ -282,23 +283,22 @@ class TestHwoSimSpeckleField:
     def test_realize_jits(self, delivery):
         field = _field(delivery, **_tabulated())
         jitted = eqx.filter_jit(
-            lambda f, t: f.realize(wavelength_nm=550.0, time_d=(t) * s2d).data
+            lambda f, t: f.realize(wavelength_nm=550.0, elapsed_s=t).data
         )
         np.testing.assert_allclose(
             np.asarray(jitted(field, 150.0)),
-            np.asarray(field.realize(wavelength_nm=550.0, time_d=(150.0) * s2d).data),
+            np.asarray(field.realize(wavelength_nm=550.0, elapsed_s=150.0).data),
         )
 
     def test_with_drift_swaps_only_the_drift(self, delivery):
         """Fails if re-anchoring drops, converts or copies an untouched field.
 
-        Covers an unused ``drift_time_s`` kept on a sinusoid field, an x64
-        wavelength re-anchored under x32 (500.00000001 would round to 500.0 if
-        converted again), and an amplitude swap traced inside
-        ``eqx.filter_jit`` (a host round trip on the dark-zone index raises
-        there). Truth source: the original field; every array other than the
-        swapped drift is bitwise equal and the gain is not copied. Exact
-        comparisons.
+        Covers an unused ``drift_time_s`` kept on a sinusoid field, a pure
+        re-anchor, and an amplitude swap traced inside ``eqx.filter_jit`` (a
+        host round trip on the dark-zone index raises there). Truth source:
+        the original field; every array other than the swapped drift is
+        bitwise equal and the gain is not copied. Exact comparisons, except the
+        doubled read, which is linear in the amplitude.
         """
         field = _field(delivery, **_sinusoid(), drift_time_s=jnp.asarray([0.0, 10.0]))
         swapped = field.with_drift(amplitude=2.0 * field.amplitude, epoch_d=1.0)
@@ -306,18 +306,12 @@ class TestHwoSimSpeckleField:
         assert swapped.gain is field.gain
         _assert_bitwise_equal_except(swapped, field, ("amplitude",))
         np.testing.assert_allclose(
-            np.asarray(swapped.coefficients(swapped.epoch_d + 10.0 * s2d)),
-            2.0 * np.asarray(field.coefficients((10.0) * s2d)),
+            np.asarray(swapped.coefficients(elapsed_s=10.0)),
+            2.0 * np.asarray(field.coefficients(elapsed_s=10.0)),
         )
-        fine = eqx.tree_at(
-            lambda f: f.wavelengths_nm,
-            field,
-            jnp.asarray([500.00000001, 550.0, 600.0], dtype=jnp.float64),
-        )
-        with jax.enable_x64(False):
-            anchored = fine.with_drift(epoch_d=2.0)
+        anchored = field.with_drift(epoch_d=2.0)
         assert anchored.epoch_d == 2.0
-        _assert_bitwise_equal_except(anchored, fine, ())
+        _assert_bitwise_equal_except(anchored, field, ())
         traced = eqx.filter_jit(lambda f, a: f.with_drift(amplitude=a))(
             field, 3.0 * field.amplitude
         )
@@ -346,8 +340,8 @@ class TestHwoSimSpeckleField:
         table = field.drift_coefficients
         swapped = field.with_tabulated_drift(drift_coefficients=-table)
         np.testing.assert_allclose(
-            np.asarray(swapped.coefficients((100.0) * s2d)),
-            -np.asarray(field.coefficients((100.0) * s2d)),
+            np.asarray(swapped.coefficients(elapsed_s=100.0)),
+            -np.asarray(field.coefficients(elapsed_s=100.0)),
         )
         anchored = field.with_tabulated_drift(epoch_d=2.5)
         assert anchored.epoch_d == 2.5
@@ -357,30 +351,6 @@ class TestHwoSimSpeckleField:
             field.with_tabulated_drift(drift_coefficients=table[:2])
         with pytest.raises(ValueError, match="sinusoid"):
             _field(delivery, **_sinusoid()).with_tabulated_drift(epoch_d=1.0)
-
-    def test_epoch_is_a_static_host_float_subtracted_before_the_cast(self, delivery):
-        """Fails if epoch_d is any PyTree leaf or time_d is cast first.
-
-        Under x32 an absolute day near 60000 resolves to 2**-8 d (337 s) in
-        float32, so casting time_d or epoch_d before the subtraction moves a
-        1e-3 Hz sinusoid by up to 2 rad. Subtracted in binary64, the elapsed
-        10 s carries ulp(60000 d) = 6.3e-7 s of error before the float32
-        cast. Truth source: the same field anchored at 0, read at the elapsed
-        time. Tolerance basis floating-point: 1e-5 is about 5 times the float32
-        rounding of the cosine arguments and of the sum of three components
-        of amplitude below one.
-        """
-        epoch = 60000.123
-        elapsed = np.asarray(10.0)
-        with jax.enable_x64(False):
-            anchored = _field(delivery, **_sinusoid())
-            field = anchored.with_drift(epoch_d=epoch)
-            assert field.epoch_d == epoch
-            _assert_epoch_is_static(field)
-            got = field.coefficients(epoch + float(elapsed) * s2d)
-            want = anchored.coefficients(float(elapsed) * s2d)
-            assert got.dtype == jnp.float32
-            np.testing.assert_allclose(np.asarray(got), np.asarray(want), atol=1e-5)
 
     def test_max_safe_elapsed_follows_float32_resolution(self, delivery):
         eps32 = float(np.finfo(np.float32).eps)

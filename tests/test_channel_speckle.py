@@ -4,7 +4,6 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-from hwoutils.constants import s2d
 from optixstuff import FocalResponse
 from optixstuff.grids import Frame, PixelGrid
 from physicaloptix import ChannelLinearization, MultiChannelLinearization
@@ -173,7 +172,7 @@ class TestCorrelatedChannelFields:
         )
         for name in ("a", "b"):
             field = fields[name]
-            eps = field.coefficients(0.0)
+            eps = field.coefficients(elapsed_s=0.0)
             de = jnp.einsum("m,myx->yx", eps, mcl[name].g_shared)
             parent = 2 * jnp.real(jnp.conj(mcl[name].e_nom) * de) + abs(de) ** 2
             parent *= mcl[name].grid.pixel_area / _E_IN
@@ -203,12 +202,12 @@ class TestTabulatedEpsAccessor:
             eps_table=table,
         )
         np.testing.assert_allclose(
-            np.asarray(field.coefficients((0.5) * s2d)),
+            np.asarray(field.coefficients(elapsed_s=0.5)),
             np.asarray([0.5, 1.0]),
             atol=1e-12,
         )
         np.testing.assert_allclose(
-            np.asarray(field.coefficients((5.0) * s2d)),
+            np.asarray(field.coefficients(elapsed_s=5.0)),
             np.asarray([2.0, 4.0]),
             atol=1e-12,
         )  # held at the endpoint
@@ -229,6 +228,6 @@ class TestOptixstuffConformance:
         )
         for field in fields.values():
             assert isinstance(field, AbstractSpeckleField)
-            delta = field.realize(wavelength_nm=500.0, time_d=(30.0) * s2d).data
+            delta = field.realize(wavelength_nm=500.0, elapsed_s=30.0).data
             assert delta.shape == (NPIX, NPIX)
             assert bool(jnp.all(jnp.isfinite(delta)))

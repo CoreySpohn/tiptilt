@@ -1,13 +1,14 @@
 """Tests for the tiptilt speckle-field family."""
 
+import equinox as eqx
 import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-from hwoutils.constants import s2d
 from optixstuff import FocalResponse
 from optixstuff.grids import Frame, Measure, PixelGrid
 
+from tiptilt.hwo_sim import HwoSimSpeckleField
 from tiptilt.speckle import (
     TabulatedSpeckleField,
     _draw_correlated_spectrum,
@@ -203,7 +204,7 @@ class TestPsdIsADensity:
                 psd=psd,
             )
             return jnp.stack(
-                [field.coefficients((float(t)) * s2d)[0] for t in [0.0, *lags]]
+                [field.coefficients(elapsed_s=float(t))[0] for t in [0.0, *lags]]
             )
 
         keys = jax.random.split(jax.random.PRNGKey(11), n)
@@ -279,7 +280,7 @@ class TestGroupedDriftField:
                 key=key,
             )
             return jnp.stack(
-                [field.coefficients((0.0) * s2d), field.coefficients((lag) * s2d)]
+                [field.coefficients(elapsed_s=0.0), field.coefficients(elapsed_s=lag)]
             )
 
         keys = jax.random.split(jax.random.PRNGKey(5), 3000)
@@ -327,7 +328,7 @@ class TestGroupedDriftField:
                 [(cov, freqs, psd)],
                 key=key,
             )
-            return field.coefficients((0.0) * s2d)
+            return field.coefficients(elapsed_s=0.0)
 
         keys = jax.random.split(jax.random.PRNGKey(9), 8000)
         samples = np.asarray(jax.vmap(eps0)(keys))
@@ -413,10 +414,10 @@ class TestPhysicaloptixIntegration:
             times,
             eps_table,
         )
-        out = speckle.realize(wavelength_nm=500.0, time_d=(50.0) * s2d).data
+        out = speckle.realize(wavelength_nm=500.0, elapsed_s=50.0).data
         assert out.shape == (32, 32)
         assert jnp.all(jnp.isfinite(out))
-        at_zero = speckle.realize(wavelength_nm=500.0, time_d=(0.0) * s2d).data
+        at_zero = speckle.realize(wavelength_nm=500.0, elapsed_s=0.0).data
         np.testing.assert_allclose(np.asarray(at_zero), 0.0, atol=1e-30)
 
 
@@ -434,7 +435,7 @@ def test_shared_law_matches_density_parent_formula(ingredients):
     nominal = np.asarray(response.e_nom)
     parent = 2 * np.real(nominal.conj() * de) + abs(de) ** 2
     parent *= response.grid.pixel_area / response.input_energy
-    image = field.realize(wavelength_nm=500.0, time_d=7.0 * s2d)
+    image = field.realize(wavelength_nm=500.0, elapsed_s=7.0)
     np.testing.assert_allclose(
         image.data, parent, rtol=0, atol=32 * np.finfo(float).eps * np.max(abs(parent))
     )
@@ -446,28 +447,114 @@ def test_shared_law_matches_density_parent_formula(ingredients):
 
 
 def test_tabulated_clock_origin_and_seconds(ingredients):
-    """Clock error bound: eight absolute-day ulps times the table slope."""
-    from hwoutils.constants import d2s
+    """Fails if the table is read in days, at an epoch offset, or not held.
 
-    epoch = 100.0
-    field = TabulatedSpeckleField(**ingredients, epoch_d=epoch)
+    Truth: the piecewise-linear table at elapsed seconds, written out; the
+    values are dyadic, so the comparison is exact. The field sits at
+    ``epoch_d = 100`` and must ignore it. The derivative between nodes is the
+    tabulated slope per second, to 8 float64 eps.
+    """
+    field = TabulatedSpeckleField(**ingredients, epoch_d=100.0)
     elapsed = np.array([-1.0, 0.0, 5.0, 10.0, 15.0, 21.0])
-    expected = np.column_stack(
-        [
-            np.interp(elapsed, ingredients["times_s"], col)
-            for col in np.asarray(ingredients["eps_table"]).T
-        ]
+    expected = np.array(
+        [[0.0, 0.0], [0.0, 0.0], [0.5, -0.5], [1.0, -1.0], [1.5, -0.25], [2.0, 0.5]]
     )
-    bound = 8 * np.spacing(epoch) * d2s * 0.15
+    np.testing.assert_array_equal(field.coefficients(elapsed_s=elapsed), expected)
+    derivative = jax.jacfwd(lambda t: field.coefficients(elapsed_s=t))(5.0)
     np.testing.assert_allclose(
-        field.coefficients(epoch + elapsed * s2d), expected, rtol=0, atol=bound
+        derivative, np.array([0.1, -0.1]), rtol=8 * np.finfo(float).eps
     )
-    np.testing.assert_array_equal(field.coefficients(epoch), [0.0, 0.0])
-    # Between nodes the exact derivative is the tabulated slope, per day.
-    derivative = jax.jacfwd(field.coefficients)(epoch + 5.0 * s2d)
-    np.testing.assert_allclose(
-        derivative, np.array([0.1, -0.1]) * d2s, rtol=8 * np.finfo(float).eps
+
+
+def _tabulated(epoch_d):
+    """A tabulated field in the active precision; coefficients at most 2 nm."""
+    rng = np.random.default_rng(0)
+    g = rng.standard_normal((2, 4, 4)) + 1j * rng.standard_normal((2, 4, 4))
+    e = rng.standard_normal((4, 4)) + 1j * rng.standard_normal((4, 4))
+    grid = PixelGrid.focal(4, 0.25, Frame(500.0, 1.0, "circumscribed"))
+    return TabulatedSpeckleField(
+        FocalResponse(e, g, grid, _e_in(3.0), 500.0),
+        [0.0, 10.0, 20.0],
+        [[0.0, 0.0], [1.0, -1.0], [2.0, 0.5]],
+        epoch_d=epoch_d,
     )
+
+
+def _hwo_sim(epoch_d):
+    """A two-component sinusoid drift on three dark-zone pixels.
+
+    Amplitudes below 1 nm, frequencies below 1e-3 Hz and phases below 2 pi, so
+    at 13.3 s each mode sums two terms whose cosine arguments are below 6.4 rad.
+    """
+    rng = np.random.default_rng(1)
+    dark_zone = np.zeros((4, 4), bool)
+    dark_zone[1, :3] = True
+    shape = (1, 2, 2)
+    return HwoSimSpeckleField(
+        rng.standard_normal((1, 3)) + 1j * rng.standard_normal((1, 3)),
+        rng.standard_normal((1, 3, 2)) + 1j * rng.standard_normal((1, 3, 2)),
+        dark_zone,
+        wavelengths_nm=[500.0],
+        grid=PixelGrid.focal(4, 0.25, Frame(500.0, 1.0, "circumscribed")),
+        epoch_d=epoch_d,
+        contrast_to_flux_fraction=7e-3,
+        amplitude=rng.random(shape),
+        frequency_hz=rng.random(shape) * 1e-3,
+        phase=rng.random(shape) * 2 * np.pi,
+    )
+
+
+@pytest.mark.parametrize(
+    ("build", "scale"),
+    [(_tabulated, 2.0), (_hwo_sim, 2 * 1.0 * (1 + 6.4))],
+    ids=["tabulated", "hwo_sim"],
+)
+@pytest.mark.parametrize("x64", [False, True], ids=["x32", "x64"])
+def test_fields_run_on_their_own_clock(build, scale, x64):
+    """Fails if a field reads ``epoch_d``, overrides the kernel or takes days.
+
+    Truth: the same field anchored at zero. Two fields that differ only in
+    ``epoch_d`` (0 and 60000.123) give bitwise equal coefficients and images
+    at each elapsed second, eagerly and compiled. The kernel is the
+    interface's own, and a positional time or a ``time_d`` keyword raises.
+    Eager against ``eqx.filter_jit``: tolerance basis floating-point, 8 eps of
+    ``scale``, the sum over terms of amplitude times (1 + cosine argument),
+    because the compiled program contracts multiply-adds (one rounding fewer).
+    The times are off the float32 grid, so a branch that casts a JAX array
+    through float32 fails the x64 comparison.
+    """
+    from optixstuff.speckle import AbstractSpeckleField
+
+    with jax.enable_x64(x64):
+        zero, anchored = build(0.0), build(60000.123)
+        assert type(anchored).elapsed_s is AbstractSpeckleField.elapsed_s
+        coefficients = eqx.filter_jit(lambda field, t: field.coefficients(elapsed_s=t))
+        realize = eqx.filter_jit(
+            lambda field, t: field.realize(wavelength_nm=500.0, elapsed_s=t).data
+        )
+        floor = 8 * float(jnp.finfo(jnp.float64 if x64 else jnp.float32).eps) * scale
+        for elapsed in (0.0, 7.1, 13.3):
+            eager = zero.coefficients(elapsed_s=elapsed)
+            np.testing.assert_array_equal(
+                anchored.coefficients(elapsed_s=elapsed), eager
+            )
+            compiled = coefficients(zero, jnp.asarray(elapsed))
+            np.testing.assert_array_equal(
+                coefficients(anchored, jnp.asarray(elapsed)), compiled
+            )
+            np.testing.assert_allclose(compiled, eager, rtol=0, atol=floor)
+            np.testing.assert_array_equal(
+                anchored.realize(wavelength_nm=500.0, elapsed_s=elapsed).data,
+                zero.realize(wavelength_nm=500.0, elapsed_s=elapsed).data,
+            )
+            np.testing.assert_array_equal(
+                realize(anchored, jnp.asarray(elapsed)),
+                realize(zero, jnp.asarray(elapsed)),
+            )
+        with pytest.raises(TypeError):
+            anchored.coefficients(1.0)
+        with pytest.raises(TypeError):
+            anchored.realize(wavelength_nm=500.0, time_d=1.0)
 
 
 def test_density_normalization_number_is_unchanged():
@@ -483,7 +570,7 @@ def test_density_normalization_number_is_unchanged():
         jnp.array([[0.0], [1.0]]),
     )
     assert float(
-        field.realize(wavelength_nm=500.0, time_d=5.0 * s2d).data[0, 0]
+        field.realize(wavelength_nm=500.0, elapsed_s=5.0).data[0, 0]
     ) == pytest.approx(0.066, rel=8 * np.finfo(float).eps)
 
 
