@@ -97,6 +97,11 @@ def _dug_command0(path, field, mask):
 
 
 def test_realized_field_matches_direct_propagation():
+    """Direct propagation anchors the residual at the design wavelength.
+
+    At twice that wavelength the path-length derivative halves. Its isolated
+    halo quarters (exact-algebra); exporting an amplitude law keeps it fixed.
+    """
     path, field, mask = _setup()
     command0 = _dug_command0(path, field, mask)
     residual, _history = maintained_residual_field(
@@ -119,6 +124,12 @@ def test_realized_field_matches_direct_propagation():
         **COMMON,
     )
     eps = _ramp_drift()
+    halo = eqx.tree_at(
+        lambda f: f.response.e_nom, residual, jnp.zeros_like(residual.response.e_nom)
+    )
+    blue, red = halo.realize(wavelength_nm=jnp.array([WL, 2 * WL]), elapsed_s=3.0).data
+    assert float(blue.sum()) > 0.0
+    np.testing.assert_allclose(red, 0.25 * blue, rtol=1e-12, atol=0)
     for k in (0, 3, 5):
         drifted = eqx.tree_at(
             lambda p: (p.stages[0].op, p.stages[1].op),

@@ -377,6 +377,7 @@ def maintained_residual_field(
         output.grid,
         input_field.energy(),
         output.grid.frame.reference_wavelength_nm,
+        wavelength_law="opd",
     )
     field = TabulatedSpeckleField(response, times_s, eps_table, epoch_d=epoch_d)
     return field, history

@@ -35,6 +35,7 @@ def ingredients():
             PixelGrid.focal(4, 0.25, Frame(500.0, 1.0, "circumscribed")),
             _e_in(3.0),
             500.0,
+            wavelength_law="opd",
         ),
         "times_s": jnp.asarray([0.0, 10.0, 20.0]),
         "eps_table": jnp.asarray([[0.0, 0.0], [1.0, -1.0], [2.0, 0.5]]),
@@ -52,7 +53,7 @@ def _focal_response(e_nom, g):
     grid = PixelGrid.regular(
         e_nom.shape, 0.25, "lod", frame=Frame(500.0, 1.0, "circumscribed")
     )
-    return FocalResponse(e_nom, g, grid, _e_in(1.0), 500.0)
+    return FocalResponse(e_nom, g, grid, _e_in(1.0), 500.0, wavelength_law="opd")
 
 
 def _ensemble_cov(covariance, weights, n_samples):
@@ -66,6 +67,22 @@ def _ensemble_cov(covariance, weights, n_samples):
 
 
 class TestCorrelatedDriftField:
+    def test_covariance_matches_response_modes(self, ingredients):
+        """The covariance dimension counts driving modes (mutation, exact sizes).
+
+        Fails if a single coefficient can broadcast across the two response modes.
+        """
+        response = ingredients["response"]
+        kwargs = dict(
+            key=jax.random.PRNGKey(0),
+            frequencies_hz=jnp.arange(1, 17),
+            psd=jnp.ones(16),
+        )
+        with pytest.raises(ValueError, match=r"\(1, 1\).*2 modes"):
+            correlated_drift_field(response, jnp.eye(1), **kwargs)
+        field = correlated_drift_field(response, jnp.eye(2), **kwargs)
+        assert field.coefficients(elapsed_s=0.0).shape == (2,)
+
     def test_returns_an_analytic_speckle_field(self):
         e_nom, g = _synthetic_lin()
         covariance = jnp.asarray([[4.0, 1.0], [1.0, 9.0]])
@@ -410,7 +427,14 @@ class TestPhysicaloptixIntegration:
             [[0.0, 0.0, 0.0, 0.0, 0.0], [1.0, 0.5, -0.3, 0.2, -0.1]]
         )
         speckle = TabulatedSpeckleField(
-            FocalResponse(lin.e_nom, lin.G, lin.grid, lin.input_energy, 500.0),
+            FocalResponse(
+                lin.e_nom,
+                lin.G,
+                lin.grid,
+                lin.input_energy,
+                500.0,
+                wavelength_law="opd",
+            ),
             times,
             eps_table,
         )
@@ -473,7 +497,7 @@ def _tabulated(epoch_d):
     e = rng.standard_normal((4, 4)) + 1j * rng.standard_normal((4, 4))
     grid = PixelGrid.focal(4, 0.25, Frame(500.0, 1.0, "circumscribed"))
     return TabulatedSpeckleField(
-        FocalResponse(e, g, grid, _e_in(3.0), 500.0),
+        FocalResponse(e, g, grid, _e_in(3.0), 500.0, wavelength_law="opd"),
         [0.0, 10.0, 20.0],
         [[0.0, 0.0], [1.0, -1.0], [2.0, 0.5]],
         epoch_d=epoch_d,
@@ -571,7 +595,12 @@ def test_density_normalization_number_is_unchanged():
     )
     field = TabulatedSpeckleField(
         FocalResponse(
-            jnp.array([[2.0 + 0j]]), jnp.array([[[3.0 + 0j]]]), grid, 5.0, 500.0
+            jnp.array([[2.0 + 0j]]),
+            jnp.array([[[3.0 + 0j]]]),
+            grid,
+            5.0,
+            500.0,
+            wavelength_law="opd",
         ),
         jnp.array([0.0, 10.0]),
         jnp.array([[0.0], [1.0]]),

@@ -219,7 +219,12 @@ def _hwo_sim_field(cast, sinusoid=False):
 def _tabulated_field(cast):
     grid = PixelGrid.focal(4, 0.25, Frame(500.0, 1.0, "circumscribed"))
     response = FocalResponse(
-        np.ones((4, 4), complex), np.ones((2, 4, 4), complex), grid, 1.0, 500.0
+        np.ones((4, 4), complex),
+        np.ones((2, 4, 4), complex),
+        grid,
+        1.0,
+        500.0,
+        wavelength_law="opd",
     )
     return TabulatedSpeckleField(
         response, cast([0.0, 10.0, 20.0]), cast(np.zeros((3, 2)))

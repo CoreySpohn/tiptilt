@@ -35,7 +35,9 @@ replays::
         ou_trajectory(covariance_nm2, timescales_s, key=key, times_s=times_s),
         creep_trajectory(rates_nm_per_s, times_s=times_s),
     )
-    response = FocalResponse(e_nom, G, grid, e_in, grid.frame.reference_wavelength_nm)
+    response = FocalResponse(
+        e_nom, G, grid, e_in, grid.frame.reference_wavelength_nm, wavelength_law="opd"
+    )
     field = TabulatedSpeckleField(response, times_s, eps)
 """
 
@@ -137,6 +139,15 @@ def _check_covariance(covariance_nm2, name="covariance_nm2"):
     return covariance
 
 
+def _check_covariance_modes(covariance, n_modes, name):
+    """Match a covariance block to the modes its coefficients drive."""
+    shape = jnp.shape(covariance)
+    if shape != (n_modes, n_modes):
+        raise ValueError(
+            f"{name} has shape {shape} but the response has {n_modes} modes"
+        )
+
+
 def _check_timescales(timescales_s, n_modes):
     """Broadcast per-mode decorrelation timescales to ``(m,)`` and validate.
 
@@ -229,7 +240,7 @@ def correlated_drift_field(
     Reuses physicaloptix's analytic cosine-sum field, but synthesizes its
     ``(amplitudes, phases)`` so the mode-coefficient process is a stationary
     Gaussian process whose ENSEMBLE equal-time modal covariance is
-    ``covariance_nm2`` (nm^2), with ensemble power distributed over
+    ``covariance_nm2``, with ensemble power distributed over
     ``frequencies_hz`` in proportion to ``psd``. This supplies the cross-mode
     correlation (segment or Zernike statistics coupled by a screen) that the
     per-mode-independent ``SpeckleProcess`` cannot.
@@ -248,9 +259,10 @@ def correlated_drift_field(
     emits a warning. The coherent cross term needs float64 inputs (x64 enabled).
 
     Args:
-        response: Monochromatic focal response with the drifting modes in order.
+        response: Caller-supplied monochromatic response defining the wavelength
+            law and mode order.
         covariance_nm2: Target ``(m, m)`` real symmetric positive-semidefinite
-            ensemble modal covariance in nm^2.
+            ensemble modal covariance in squared coefficient units (nm^2 for OPD).
         key: A JAX PRNG key freezing the drawn realization.
         frequencies_hz: Temporal frequency grid, shape ``(f,)``.
         psd: Temporal power spectral density at each frequency, shape ``(f,)``
@@ -262,10 +274,12 @@ def correlated_drift_field(
         A physicaloptix ``AnalyticSpeckleField``.
 
     Raises:
-        ValueError: If ``covariance_nm2`` is not square, not symmetric, or has a
-            materially negative eigenvalue, or if ``psd`` has non-positive total.
+        ValueError: If the covariance does not match the modes, is asymmetric,
+            or has a materially negative eigenvalue, or if ``psd`` has
+            non-positive total.
     """
-    _check_covariance(covariance_nm2)
+    covariance = _check_covariance(covariance_nm2)
+    _check_covariance_modes(covariance, response.G.shape[-3], "covariance_nm2")
 
     power = _line_powers(frequencies_hz, psd)
     total = float(power.sum())
@@ -281,7 +295,7 @@ def correlated_drift_field(
         )
 
     weights = jnp.asarray(2.0 * power / total)
-    amplitudes, phases = _draw_correlated_spectrum(covariance_nm2, key, weights)
+    amplitudes, phases = _draw_correlated_spectrum(covariance, key, weights)
     return AnalyticSpeckleField(
         response,
         amplitudes=amplitudes,
@@ -316,7 +330,8 @@ def grouped_drift_field(
     cross-spectral density rather than a list.
 
     Args:
-        response: Monochromatic focal response with the drifting modes in order.
+        response: Caller-supplied monochromatic response defining the wavelength
+            law and mode order.
         groups: Sequence of ``(covariance_nm2, frequencies_hz, psd)``. Every
             block needs the same NUMBER of frequencies (they stack into one
             ``(m, f)`` array) but the grids and PSD shapes may differ.
@@ -413,16 +428,27 @@ def correlated_channel_fields(
         psd: Temporal PSD shape over those frequencies.
         local: Optional dict mapping a channel name to ``(g_local,
             covariance_local_nm2)`` -- that channel's independent
-            non-common-path block.
+            non-common-path block. Its modes must follow the same wavelength law
+            as the shared modes, given by ``mcl.kind``.
         epoch_d: Days from the scene epoch mapping to ``time_s = 0``. Default 0.0.
 
     Returns:
         A dict mapping each channel name to an ``AnalyticSpeckleField``.
 
     Raises:
-        ValueError: If the shared covariance fails
-            ``correlated_drift_field``'s validity checks.
+        ValueError: If a covariance does not match its modes or the shared
+            basis kind has no monochromatic law.
     """
+    if mcl.kind not in ("opd", "amplitude"):
+        raise ValueError(
+            f"channel fields need an 'opd' or 'amplitude' basis kind, got {mcl.kind!r}"
+        )
+    for channel in mcl.channels:
+        _check_covariance_modes(
+            shared_covariance_nm2,
+            channel.g_shared.shape[-3],
+            f"{channel.name} shared covariance",
+        )
     power = _line_powers(frequencies_hz, psd)
     weights = jnp.asarray(2.0 * power / float(power.sum()))
 
@@ -438,15 +464,24 @@ def correlated_channel_fields(
         amplitudes, phases = shared_amp, shared_phase
         if local is not None and name in local:
             g_local, covariance_local = local[name]
+            g_local = jnp.asarray(g_local)
+            _check_covariance_modes(
+                covariance_local, g_local.shape[-3], f"{name} local covariance"
+            )
             local_amp, local_phase = _draw_correlated_spectrum(
                 covariance_local, jax.random.fold_in(key_locals, i), weights
             )
-            g = jnp.concatenate([g, jnp.asarray(g_local)], axis=0)
+            g = jnp.concatenate([g, g_local], axis=0)
             amplitudes = jnp.concatenate([shared_amp, local_amp], axis=0)
             phases = jnp.concatenate([shared_phase, local_phase], axis=0)
         fields[name] = AnalyticSpeckleField(
             FocalResponse(
-                channel.e_nom, g, channel.grid, mcl.input_energy, mcl.wavelength_nm
+                channel.e_nom,
+                g,
+                channel.grid,
+                mcl.input_energy,
+                mcl.wavelength_nm,
+                wavelength_law=mcl.kind,
             ),
             amplitudes=amplitudes,
             frequencies_hz=jnp.asarray(frequencies_hz),
@@ -459,6 +494,7 @@ def correlated_channel_fields(
 class TabulatedSpeckleField(LinearSpeckleField):
     """Replay modal trajectories through a monochromatic focal response.
 
+    The caller's focal response defines the wavelength law.
     The inherited law includes interference with e_nom; a zero nominal
     response produces a pure halo. ``coefficients(*, elapsed_s)``
     interpolates ``eps_table`` at ``elapsed_s`` on ``times_s`` (seconds since

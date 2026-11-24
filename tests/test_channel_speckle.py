@@ -1,5 +1,7 @@
 """Tests for the correlated dual-channel speckle constructor and eps access."""
 
+from dataclasses import replace
+
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -53,6 +55,50 @@ def _white_psd(n=256):
 
 
 class TestCorrelatedChannelFields:
+    @pytest.mark.parametrize(("kind", "ratio"), [("opd", 0.25), ("amplitude", 1.0)])
+    def test_channel_halo_follows_shared_basis_kind(self, kind, ratio):
+        """The squared shared and local mode sum gives the exact-algebra halo.
+
+        Fails if the channel exports a wavelength law different from its basis.
+        """
+        mcl = _synthetic_mcl(jax.random.PRNGKey(0), names=("a",))
+        channel = replace(mcl["a"], e_nom=jnp.zeros_like(mcl["a"].e_nom))
+        mcl = replace(mcl, channels=(channel,), kind=kind)
+        frequencies, psd = _white_psd(8)
+        field = correlated_channel_fields(
+            mcl,
+            jnp.eye(M_SHARED),
+            key=jax.random.PRNGKey(1),
+            frequencies_hz=frequencies,
+            psd=psd,
+            local={"a": (channel.g_shared[:1], jnp.eye(1))},
+        )["a"]
+        blue, red = field.realize(wavelength_nm=jnp.array([500.0, 1000.0])).data
+        np.testing.assert_allclose(red / blue, ratio, rtol=1e-12, atol=0)
+
+    def test_channel_requires_known_kind_and_matching_covariances(self):
+        """The shared and local block dimensions are exact (mutation).
+
+        Fails if an unknown kind is accepted or a covariance supplies one
+        coefficient for several sensitivity columns.
+        """
+        mcl = _synthetic_mcl(jax.random.PRNGKey(0), names=("a",))
+        frequencies, psd = _white_psd(8)
+        kwargs = dict(key=jax.random.PRNGKey(1), frequencies_hz=frequencies, psd=psd)
+        with pytest.raises(ValueError, match="basis kind"):
+            correlated_channel_fields(
+                replace(mcl, kind=None), jnp.eye(M_SHARED), **kwargs
+            )
+        with pytest.raises(ValueError, match=r"shared covariance.*\(1, 1\).*3 modes"):
+            correlated_channel_fields(mcl, jnp.eye(1), **kwargs)
+        with pytest.raises(ValueError, match=r"local covariance.*\(1, 1\).*2 modes"):
+            correlated_channel_fields(
+                mcl,
+                jnp.eye(M_SHARED),
+                local={"a": (mcl["a"].g_shared[:2], jnp.eye(1))},
+                **kwargs,
+            )
+
     def test_shared_draw_is_identical_across_channels(self):
         mcl = _synthetic_mcl(jax.random.PRNGKey(0))
         sigma = jnp.diag(jnp.asarray([4.0, 1.0, 0.25]))
@@ -197,6 +243,7 @@ class TestTabulatedEpsAccessor:
                 ),
                 _E_IN,
                 500.0,
+                wavelength_law="opd",
             ),
             times_s=times,
             eps_table=table,
