@@ -42,6 +42,7 @@ import jax.numpy as jnp
 import numpy as np
 from astropy.io import fits
 from hwoutils.constants import d2s
+from hwoutils.leaves import as_float_leaf
 from jax.typing import ArrayLike
 from jaxtyping import Array
 from optixstuff.grids import Frame, Image, Measure, PixelGrid
@@ -229,7 +230,7 @@ class HwoSimSpeckleField(AbstractSpeckleField):
     """
 
     grid: PixelGrid
-    epoch_d: float
+    epoch_d: Array = eqx.field(converter=as_float_leaf)
     wavelengths_nm: Array
     e_nom: Array  # complex (num_wl, num_pix): nominal field on the pixel list
     gain: Array  # complex (num_wl, num_pix, num_mode): d(E)/d(mode), flat modes
@@ -240,7 +241,7 @@ class HwoSimSpeckleField(AbstractSpeckleField):
     phase: Array | None
     drift_time_s: Array | None
     drift_coefficients: Array | None
-    contrast_to_flux_fraction: float
+    contrast_to_flux_fraction: Array = eqx.field(converter=as_float_leaf)
 
     def __init__(
         self,
@@ -290,7 +291,7 @@ class HwoSimSpeckleField(AbstractSpeckleField):
         self.grid = grid
         if grid.unit != "lod" or grid.shape != dark_zone.shape:
             raise ValueError("grid must be native lod and match dark_zone")
-        self.epoch_d = float(epoch_d)
+        self.epoch_d = epoch_d
         self.wavelengths_nm = jnp.asarray(wavelengths_nm, dtype=float)
         self.e_nom = jnp.asarray(e_nom)
         # Flat modes, so the drift contracts as a single matrix-vector product
@@ -309,7 +310,7 @@ class HwoSimSpeckleField(AbstractSpeckleField):
         self.drift_coefficients = (
             None if drift_coefficients is None else jnp.asarray(drift_coefficients)
         )
-        self.contrast_to_flux_fraction = float(contrast_to_flux_fraction)
+        self.contrast_to_flux_fraction = contrast_to_flux_fraction
 
     def __check_init__(self):
         """Require exactly one drift form, with consistent shapes."""
@@ -474,7 +475,7 @@ class HwoSimSpeckleField(AbstractSpeckleField):
                 "to point it at a different window or series."
             )
         updates = {
-            "epoch_d": float(self.epoch_d if epoch_d is None else epoch_d),
+            "epoch_d": as_float_leaf(self.epoch_d if epoch_d is None else epoch_d),
             "amplitude": self.amplitude
             if amplitude is None
             else jnp.asarray(amplitude),
@@ -542,7 +543,7 @@ class HwoSimSpeckleField(AbstractSpeckleField):
         return eqx.tree_at(
             lambda s: (s.epoch_d, s.drift_time_s, s.drift_coefficients),
             self,
-            (float(self.epoch_d if epoch_d is None else epoch_d), t_new, c_new),
+            (as_float_leaf(self.epoch_d if epoch_d is None else epoch_d), t_new, c_new),
         )
 
     def max_safe_elapsed_s(

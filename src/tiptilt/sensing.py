@@ -13,6 +13,7 @@ real system cannot take.
 import equinox as eqx
 import jax
 import jax.numpy as jnp
+from hwoutils.leaves import as_leaf
 from jaxtyping import Array
 from physicaloptix import Field, ModeBasis, PlaneKind
 
@@ -468,7 +469,7 @@ class KalmanEstimator(AbstractEstimator):
 
     filter: KalmanFieldEstimator
     probes: tuple
-    step_index: Array
+    step_index: Array = eqx.field(converter=as_leaf)
     last_command: Array
     input_field: eqx.Module
     model_field: eqx.Module
@@ -517,7 +518,7 @@ class KalmanEstimator(AbstractEstimator):
                 measurement_noise=measurement_noise,
             ),
             probes=tuple(probes),
-            step_index=jnp.asarray(0),
+            step_index=0,
             last_command=jnp.zeros(model.n_total),
             input_field=input_field,
             model_field=model_field,

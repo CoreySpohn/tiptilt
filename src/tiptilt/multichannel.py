@@ -26,6 +26,7 @@ The machinery is three pieces on the existing seams:
 
 import equinox as eqx
 import jax.numpy as jnp
+from hwoutils.leaves import as_float_leaf
 from jaxtyping import Array
 from physicaloptix import PhaseScreen, linearize_shared
 
@@ -143,7 +144,7 @@ class FeedForwardController(AbstractController):
     """
 
     solve_matrix: Array
-    gain: Array
+    gain: Array = eqx.field(converter=as_float_leaf)
 
     @classmethod
     def build(cls, model, *, sense, gain, regularization, weights=None):
@@ -169,7 +170,7 @@ class FeedForwardController(AbstractController):
         h = jnp.concatenate([jnp.real(g), jnp.imag(g)], axis=0)
         gram = h.T @ h + regularization * jnp.eye(h.shape[1])
         solve_matrix = jnp.linalg.solve(gram, h.T)
-        return cls(solve_matrix=solve_matrix, gain=jnp.asarray(gain))
+        return cls(solve_matrix=solve_matrix, gain=gain)
 
     def command_delta(self, estimate):
         """The negated weighted-least-squares shared-mode estimate."""

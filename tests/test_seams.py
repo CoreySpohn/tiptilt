@@ -1,7 +1,10 @@
 """Tests for the estimator/controller seams (DarkZoneModel and the laws)."""
 
+import jax
 import jax.numpy as jnp
 import numpy as np
+import pytest
+from optixstuff import FocalResponse
 from optixstuff.grids import Frame, PixelGrid
 from physicaloptix import (
     Field,
@@ -16,10 +19,14 @@ from physicaloptix import (
 from tiptilt.control import (
     DarkZoneModel,
     EFCController,
+    MatrixFreeEFCController,
     PredictiveController,
     StrokeMinController,
 )
+from tiptilt.hwo_sim import HwoSimSpeckleField
+from tiptilt.multichannel import FeedForwardController
 from tiptilt.sensing import KalmanEstimator, OracleEstimator
+from tiptilt.speckle import TabulatedSpeckleField
 
 WL = 500.0
 _KS = [(3, 1), (3, 0), (3, 2), (2, 1), (4, 1), (3, -1)]
@@ -181,3 +188,77 @@ class TestDarkZoneModelOperatingPoint:
         np.testing.assert_allclose(
             np.asarray(warm.operating_point), np.asarray(command0)
         )
+
+
+def _hwo_sim_field():
+    dark_zone = np.zeros((4, 4), bool)
+    dark_zone[1, :3] = True
+    return HwoSimSpeckleField(
+        np.ones((1, 3), complex),
+        np.ones((1, 3, 2), complex),
+        dark_zone,
+        wavelengths_nm=[500.0],
+        grid=PixelGrid.focal(4, 0.25, Frame(500.0, 1.0, "circumscribed")),
+        epoch_d=60000.5,
+        contrast_to_flux_fraction=7e-3,
+        drift_time_s=[0.0, 10.0],
+        drift_coefficients=np.zeros((2, 1, 2)),
+    )
+
+
+def _tabulated_field():
+    grid = PixelGrid.focal(4, 0.25, Frame(500.0, 1.0, "circumscribed"))
+    response = FocalResponse(
+        np.ones((4, 4), complex), np.ones((2, 4, 4), complex), grid, 1.0, 500.0
+    )
+    return TabulatedSpeckleField(response, [0.0, 10.0, 20.0], np.zeros((3, 2)))
+
+
+def _efc():
+    return EFCController(jnp.zeros((2, 2)), jnp.ones(2), 0.5)
+
+
+def _z2():
+    return jnp.zeros((2, 2))
+
+
+_LEAF_CASES = {
+    "efc": (_efc, ["gain"]),
+    "stroke": (
+        lambda: StrokeMinController(
+            _z2(), _z2(), jnp.ones(2), 1, jnp.ones(3), 1e-8, 0.7
+        ),
+        ["target_contrast", "gain"],
+    ),
+    "matrix_free": (
+        lambda: MatrixFreeEFCController(None, None, jnp.zeros(2), 0.5, 1e-6, 10, 1e-6),
+        ["gain"],
+    ),
+    "feed_forward": (lambda: FeedForwardController(_z2(), 0.5), ["gain"]),
+    "predictive": (
+        lambda: PredictiveController(_efc(), jnp.zeros(2), 1.0, jnp.asarray(False)),
+        ["alpha"],
+    ),
+    "kalman": (
+        lambda: KalmanEstimator(None, (), 0, jnp.zeros(2), None, None, 0),
+        ["step_index"],
+    ),
+    "hwo_sim": (_hwo_sim_field, ["epoch_d", "contrast_to_flux_fraction"]),
+    "tabulated": (_tabulated_field, ["times_s"]),
+}
+
+
+@pytest.mark.parametrize("case", _LEAF_CASES)
+def test_converted_fields_are_strong_leaves_under_x32(case):
+    """A Python number or NumPy value given at construction is stored as a
+    strongly typed array of the active dtype (float32, or int32 for the probe
+    counter). Truth source: the leaf rule; no tolerance, dtypes are exact."""
+    build, names = _LEAF_CASES[case]
+    with jax.enable_x64(False):
+        module = build()
+        for name in names:
+            leaf = getattr(module, name)
+            expected = jnp.int32 if name == "step_index" else jnp.float32
+            assert isinstance(leaf, jax.Array), name
+            assert leaf.dtype == expected, name
+            assert not leaf.weak_type, name

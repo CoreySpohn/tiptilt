@@ -22,6 +22,7 @@ through the feedback.
 import equinox as eqx
 import jax
 import jax.numpy as jnp
+from hwoutils.leaves import as_float_leaf
 from jaxtyping import Array
 from physicaloptix import PhaseScreen
 
@@ -281,7 +282,7 @@ class EFCController(AbstractController):
 
     control_matrix: Array
     stack_weights: Array
-    gain: Array
+    gain: Array = eqx.field(converter=as_float_leaf)
 
     @classmethod
     def build(cls, model, *, gain, regularization):
@@ -303,7 +304,7 @@ class EFCController(AbstractController):
         return cls(
             control_matrix=jnp.linalg.solve(gram, response.T),
             stack_weights=model.stack_weights,
-            gain=jnp.asarray(gain),
+            gain=gain,
         )
 
     def command_delta(self, estimate):
@@ -337,8 +338,8 @@ class StrokeMinController(AbstractController):
     stack_weights: Array
     n_dark: int = eqx.field(static=True)
     mu_grid: Array
-    target_contrast: Array
-    gain: Array
+    target_contrast: Array = eqx.field(converter=as_float_leaf)
+    gain: Array = eqx.field(converter=as_float_leaf)
 
     @classmethod
     def build(cls, model, *, target_contrast, mu_grid=None, gain=1.0):
@@ -365,8 +366,8 @@ class StrokeMinController(AbstractController):
             stack_weights=model.stack_weights,
             n_dark=n_dark,
             mu_grid=jnp.asarray(mu_grid),
-            target_contrast=jnp.asarray(target_contrast),
-            gain=jnp.asarray(gain),
+            target_contrast=target_contrast,
+            gain=gain,
         )
 
     def command_delta(self, estimate):
@@ -432,7 +433,7 @@ class MatrixFreeEFCController(AbstractController):
     model: DarkZoneModel
     field: eqx.Module
     command: Array
-    gain: Array
+    gain: Array = eqx.field(converter=as_float_leaf)
     regularization: float = eqx.field(static=True)
     max_iterations: int = eqx.field(static=True)
     tol: float = eqx.field(static=True)
@@ -473,7 +474,7 @@ class MatrixFreeEFCController(AbstractController):
             model=model,
             field=jacobian_field,
             command=jnp.asarray(command),
-            gain=jnp.asarray(gain),
+            gain=gain,
             regularization=float(regularization),
             max_iterations=int(max_iterations),
             tol=float(tol),
@@ -522,7 +523,7 @@ class PredictiveController(AbstractController):
 
     efc: EFCController
     prev_estimate: Array
-    alpha: Array
+    alpha: Array = eqx.field(converter=as_float_leaf)
     primed: Array
 
     @classmethod
@@ -542,7 +543,7 @@ class PredictiveController(AbstractController):
         return cls(
             efc=EFCController.build(model, gain=gain, regularization=regularization),
             prev_estimate=jnp.zeros(n_stack, dtype=complex),
-            alpha=jnp.asarray(alpha),
+            alpha=alpha,
             primed=jnp.asarray(False),
         )
 

@@ -46,6 +46,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from hwoutils.constants import d2s
+from hwoutils.leaves import as_float_leaf
 from jaxtyping import Array
 from optixstuff import FocalResponse, LinearSpeckleField
 from optixstuff.spectral import trapezoid_weights
@@ -465,7 +466,7 @@ class TabulatedSpeckleField(LinearSpeckleField):
     scene days.
     """
 
-    times_s: Array = eqx.field(converter=jnp.asarray)
+    times_s: Array = eqx.field(converter=as_float_leaf)
     eps_table: Array = eqx.field(converter=jnp.asarray)
 
     def __check_init__(self):
