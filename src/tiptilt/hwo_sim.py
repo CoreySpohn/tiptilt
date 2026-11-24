@@ -34,6 +34,7 @@ tabulated form. Which form is in use is a provenance fact about every rendered
 frame, so :attr:`HwoSimSpeckleField.drift_is_tabulated` reports it.
 """
 
+import copy
 import math
 from pathlib import Path
 
@@ -465,12 +466,13 @@ class HwoSimSpeckleField(AbstractSpeckleField):
     ) -> "HwoSimSpeckleField":
         """Copy with a new sinusoid drift realization, reusing the field arrays.
 
-        The copy is rebuilt through the constructor, since ``epoch_d`` is a
-        static field that ``eqx.tree_at`` cannot replace. The stored arrays
-        pass through unchanged and uncopied, so the gain matrix, hundreds of
-        megabytes at full size, is never uploaded again and an independent
-        wavefront realization per visit is cheap. That is the right model for
-        revisits separated by more than the drift correlation time.
+        Only the supplied values are converted; every other field, including
+        an unused drift array and the dtype it was stored in, passes through
+        unchanged and uncopied. The gain matrix, hundreds of megabytes at full
+        size, is never uploaded again, so an independent wavefront realization
+        per visit is cheap. That is the right model for revisits separated by
+        more than the drift correlation time. The drift arrays may be traced,
+        so the copy can be made inside ``eqx.filter_jit``.
 
         Args:
             epoch_d: New clock origin. None keeps the current one.
@@ -491,11 +493,8 @@ class HwoSimSpeckleField(AbstractSpeckleField):
                 "this field carries a tabulated drift; use with_tabulated_drift "
                 "to point it at a different window or series."
             )
-        return self._rebuild(
-            epoch_d=self.epoch_d if epoch_d is None else epoch_d,
-            amplitude=self.amplitude if amplitude is None else amplitude,
-            frequency_hz=self.frequency_hz if frequency_hz is None else frequency_hz,
-            phase=self.phase if phase is None else phase,
+        return self._reanchor(
+            epoch_d, amplitude=amplitude, frequency_hz=frequency_hz, phase=phase
         )
 
     def with_tabulated_drift(
@@ -511,7 +510,8 @@ class HwoSimSpeckleField(AbstractSpeckleField):
         fresh random realization but a different slice of history: another
         window of the same series, another control scenario, or another run.
         Re-anchoring ``epoch_d`` to the window being rendered is usually part
-        of that, since the abscissa is seconds from the clock origin.
+        of that, since the abscissa is seconds from the clock origin. As in
+        :meth:`with_drift`, only the supplied values are converted.
 
         Args:
             epoch_d: New clock origin. None keeps the current one.
@@ -531,34 +531,40 @@ class HwoSimSpeckleField(AbstractSpeckleField):
                 "this field carries a sinusoid drift; use with_drift, or "
                 "construct a new field with drift_coefficients."
             )
-        return self._rebuild(
-            epoch_d=self.epoch_d if epoch_d is None else epoch_d,
-            drift_time_s=self.drift_time_s if drift_time_s is None else drift_time_s,
-            drift_coefficients=(
-                self.drift_coefficients
-                if drift_coefficients is None
-                else drift_coefficients
-            ),
+        return self._reanchor(
+            epoch_d, drift_time_s=drift_time_s, drift_coefficients=drift_coefficients
         )
 
-    def _rebuild(self, *, epoch_d, **drift) -> "HwoSimSpeckleField":
-        """Construct a copy with a new clock origin and drift, same field arrays.
+    def _reanchor(self, epoch_d, **drift) -> "HwoSimSpeckleField":
+        """Copy with the supplied clock origin and drift arrays, all else as stored.
 
-        The constructor converts and validates the drift, and passes the
-        stored field arrays through without copying them.
+        The supplied drift arrays go in through ``eqx.tree_at`` after the same
+        conversion the constructor applies. ``epoch_d`` is a static field,
+        which ``eqx.tree_at`` cannot reach, so it is set on a shallow copy the
+        way Equinox's own unflattening sets fields. The class checks then run
+        on the result, as the constructor would run them.
         """
-        dark_zone = np.zeros(math.prod(self.grid_shape), dtype=bool)
-        dark_zone[np.asarray(self.dark_zone_index)] = True
-        return type(self)(
-            self.e_nom,
-            self.gain,
-            dark_zone.reshape(self.grid_shape),
-            wavelengths_nm=self.wavelengths_nm,
-            grid=self.grid,
-            epoch_d=epoch_d,
-            contrast_to_flux_fraction=self.contrast_to_flux_fraction,
-            **drift,
-        )
+        supplied = {
+            name: as_float_leaf(value)
+            for name, value in drift.items()
+            if value is not None
+        }
+        new = self
+        if supplied:
+            names = tuple(supplied)
+            new = eqx.tree_at(
+                lambda f: tuple(getattr(f, name) for name in names),
+                new,
+                tuple(supplied.values()),
+            )
+        if epoch_d is not None:
+            new = copy.copy(new)
+            object.__setattr__(new, "epoch_d", float(epoch_d))
+        for cls in type(new).__mro__:
+            check = cls.__dict__.get("__check_init__")
+            if check is not None:
+                check(new)
+        return new
 
     def max_safe_elapsed_s(
         self, phase_tol_rad: float = 0.05, *, spacing_tol_frac: float = 0.05

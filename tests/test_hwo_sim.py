@@ -73,6 +73,13 @@ def _tabulated(num_zern=NUM_ZERN):
     }
 
 
+def _assert_epoch_is_static(field):
+    """``epoch_d`` is a Python float and no PyTree leaf at all, filtered or not."""
+    assert type(field.epoch_d) is float
+    paths = jax.tree_util.tree_leaves_with_path(field)
+    assert not any("epoch_d" in jax.tree_util.keystr(path) for path, _ in paths)
+
+
 def _assert_bitwise_equal_except(new, old, changed):
     for name in (
         "wavelengths_nm",
@@ -86,12 +93,16 @@ def _assert_bitwise_equal_except(new, old, changed):
         "drift_coefficients",
         "contrast_to_flux_fraction",
     ):
-        if name in changed or getattr(old, name) is None:
+        if name in changed:
             continue
         a, b = getattr(new, name), getattr(old, name)
-        assert a.dtype == b.dtype, name
-        np.testing.assert_array_equal(np.asarray(a), np.asarray(b), err_msg=name)
+        if b is None:
+            assert a is None, name
+            continue
+        assert a.dtype == b.dtype and a.shape == b.shape, name
+        assert np.asarray(a).tobytes() == np.asarray(b).tobytes(), name
     assert new.grid == old.grid and new.grid_shape == old.grid_shape
+    _assert_epoch_is_static(new)
 
 
 class TestLoadHwoSim:
@@ -279,26 +290,59 @@ class TestHwoSimSpeckleField:
         )
 
     def test_with_drift_swaps_only_the_drift(self, delivery):
-        """Fails if re-anchoring loses the new epoch or touches another field.
+        """Fails if re-anchoring drops, converts or copies an untouched field.
 
-        Truth source: the original field; every array other than the swapped
-        drift is bitwise equal, the gain is not copied. Exact comparisons.
+        Covers an unused ``drift_time_s`` kept on a sinusoid field, an x64
+        wavelength re-anchored under x32 (500.00000001 would round to 500.0 if
+        converted again), and an amplitude swap traced inside
+        ``eqx.filter_jit`` (a host round trip on the dark-zone index raises
+        there). Truth source: the original field; every array other than the
+        swapped drift is bitwise equal and the gain is not copied. Exact
+        comparisons.
         """
-        field = _field(delivery, **_sinusoid())
+        field = _field(delivery, **_sinusoid(), drift_time_s=jnp.asarray([0.0, 10.0]))
         swapped = field.with_drift(amplitude=2.0 * field.amplitude, epoch_d=1.0)
         assert swapped.epoch_d == 1.0
-        assert type(swapped.epoch_d) is float
         assert swapped.gain is field.gain
         _assert_bitwise_equal_except(swapped, field, ("amplitude",))
         np.testing.assert_allclose(
             np.asarray(swapped.coefficients(swapped.epoch_d + 10.0 * s2d)),
             2.0 * np.asarray(field.coefficients((10.0) * s2d)),
         )
+        fine = eqx.tree_at(
+            lambda f: f.wavelengths_nm,
+            field,
+            jnp.asarray([500.00000001, 550.0, 600.0], dtype=jnp.float64),
+        )
+        with jax.enable_x64(False):
+            anchored = fine.with_drift(epoch_d=2.0)
+        assert anchored.epoch_d == 2.0
+        _assert_bitwise_equal_except(anchored, fine, ())
+        traced = eqx.filter_jit(lambda f, a: f.with_drift(amplitude=a))(
+            field, 3.0 * field.amplitude
+        )
+        _assert_bitwise_equal_except(traced, field, ("amplitude",))
+        np.testing.assert_array_equal(
+            np.asarray(traced.amplitude), 3.0 * np.asarray(field.amplitude)
+        )
         with pytest.raises(ValueError, match="tabulated"):
             _field(delivery, **_tabulated()).with_drift(epoch_d=1.0)
 
     def test_with_tabulated_drift_swaps_the_series(self, delivery):
-        field = _field(delivery, **_tabulated())
+        """Fails if the tabulated copy drops a field or loses the new epoch.
+
+        The unused sinusoid ``frequency_hz`` and ``phase`` supplied with the
+        series must survive, and ``amplitude`` must stay None. Truth source:
+        the original field and the negated series. Exact comparisons, except
+        the interpolated read, which is linear in the table.
+        """
+        sinusoid = _sinusoid()
+        field = _field(
+            delivery,
+            **_tabulated(),
+            frequency_hz=sinusoid["frequency_hz"],
+            phase=sinusoid["phase"],
+        )
         table = field.drift_coefficients
         swapped = field.with_tabulated_drift(drift_coefficients=-table)
         np.testing.assert_allclose(
@@ -307,7 +351,6 @@ class TestHwoSimSpeckleField:
         )
         anchored = field.with_tabulated_drift(epoch_d=2.5)
         assert anchored.epoch_d == 2.5
-        assert type(anchored.epoch_d) is float
         assert anchored.gain is field.gain
         _assert_bitwise_equal_except(anchored, field, ())
         with pytest.raises(ValueError, match="samples"):
@@ -316,7 +359,7 @@ class TestHwoSimSpeckleField:
             _field(delivery, **_sinusoid()).with_tabulated_drift(epoch_d=1.0)
 
     def test_epoch_is_a_static_host_float_subtracted_before_the_cast(self, delivery):
-        """Fails if epoch_d is stored as an array leaf or time_d is cast first.
+        """Fails if epoch_d is any PyTree leaf or time_d is cast first.
 
         Under x32 an absolute day near 60000 resolves to 2**-8 d (337 s) in
         float32, so casting time_d or epoch_d before the subtraction moves a
@@ -332,9 +375,8 @@ class TestHwoSimSpeckleField:
         with jax.enable_x64(False):
             anchored = _field(delivery, **_sinusoid())
             field = anchored.with_drift(epoch_d=epoch)
-            assert type(field.epoch_d) is float and field.epoch_d == epoch
-            params = jax.tree.leaves(eqx.filter(field, eqx.is_inexact_array))
-            assert not any(leaf is field.epoch_d for leaf in params)
+            assert field.epoch_d == epoch
+            _assert_epoch_is_static(field)
             got = field.coefficients(epoch + float(elapsed) * s2d)
             want = anchored.coefficients(float(elapsed) * s2d)
             assert got.dtype == jnp.float32
