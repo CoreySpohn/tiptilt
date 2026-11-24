@@ -1,6 +1,7 @@
 """Tests for the hwo_sim reader and its speckle field, on synthetic files."""
 
 import equinox as eqx
+import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
@@ -70,6 +71,27 @@ def _tabulated(num_zern=NUM_ZERN):
         "drift_time_s": times,
         "drift_coefficients": jnp.asarray(rng.standard_normal((3, NUM_SEG, num_zern))),
     }
+
+
+def _assert_bitwise_equal_except(new, old, changed):
+    for name in (
+        "wavelengths_nm",
+        "e_nom",
+        "gain",
+        "dark_zone_index",
+        "amplitude",
+        "frequency_hz",
+        "phase",
+        "drift_time_s",
+        "drift_coefficients",
+        "contrast_to_flux_fraction",
+    ):
+        if name in changed or getattr(old, name) is None:
+            continue
+        a, b = getattr(new, name), getattr(old, name)
+        assert a.dtype == b.dtype, name
+        np.testing.assert_array_equal(np.asarray(a), np.asarray(b), err_msg=name)
+    assert new.grid == old.grid and new.grid_shape == old.grid_shape
 
 
 class TestLoadHwoSim:
@@ -257,10 +279,17 @@ class TestHwoSimSpeckleField:
         )
 
     def test_with_drift_swaps_only_the_drift(self, delivery):
+        """Fails if re-anchoring loses the new epoch or touches another field.
+
+        Truth source: the original field; every array other than the swapped
+        drift is bitwise equal, the gain is not copied. Exact comparisons.
+        """
         field = _field(delivery, **_sinusoid())
         swapped = field.with_drift(amplitude=2.0 * field.amplitude, epoch_d=1.0)
         assert swapped.epoch_d == 1.0
+        assert type(swapped.epoch_d) is float
         assert swapped.gain is field.gain
+        _assert_bitwise_equal_except(swapped, field, ("amplitude",))
         np.testing.assert_allclose(
             np.asarray(swapped.coefficients(swapped.epoch_d + 10.0 * s2d)),
             2.0 * np.asarray(field.coefficients((10.0) * s2d)),
@@ -276,10 +305,40 @@ class TestHwoSimSpeckleField:
             np.asarray(swapped.coefficients((100.0) * s2d)),
             -np.asarray(field.coefficients((100.0) * s2d)),
         )
+        anchored = field.with_tabulated_drift(epoch_d=2.5)
+        assert anchored.epoch_d == 2.5
+        assert type(anchored.epoch_d) is float
+        assert anchored.gain is field.gain
+        _assert_bitwise_equal_except(anchored, field, ())
         with pytest.raises(ValueError, match="samples"):
             field.with_tabulated_drift(drift_coefficients=table[:2])
         with pytest.raises(ValueError, match="sinusoid"):
             _field(delivery, **_sinusoid()).with_tabulated_drift(epoch_d=1.0)
+
+    def test_epoch_is_a_static_host_float_subtracted_before_the_cast(self, delivery):
+        """Fails if epoch_d is stored as an array leaf or time_d is cast first.
+
+        Under x32 an absolute day near 60000 resolves to 2**-8 d (337 s) in
+        float32, so casting time_d or epoch_d before the subtraction moves a
+        1e-3 Hz sinusoid by up to 2 rad. Subtracted in binary64, the elapsed
+        10 s carries ulp(60000 d) = 6.3e-7 s of error before the float32
+        cast. Truth source: the same field anchored at 0, read at the elapsed
+        time. Tolerance basis floating-point: 1e-5 is about 5 times the float32
+        rounding of the cosine arguments and of the sum of three components
+        of amplitude below one.
+        """
+        epoch = 60000.123
+        elapsed = np.asarray(10.0)
+        with jax.enable_x64(False):
+            anchored = _field(delivery, **_sinusoid())
+            field = anchored.with_drift(epoch_d=epoch)
+            assert type(field.epoch_d) is float and field.epoch_d == epoch
+            params = jax.tree.leaves(eqx.filter(field, eqx.is_inexact_array))
+            assert not any(leaf is field.epoch_d for leaf in params)
+            got = field.coefficients(epoch + float(elapsed) * s2d)
+            want = anchored.coefficients(float(elapsed) * s2d)
+            assert got.dtype == jnp.float32
+            np.testing.assert_allclose(np.asarray(got), np.asarray(want), atol=1e-5)
 
     def test_max_safe_elapsed_follows_float32_resolution(self, delivery):
         eps32 = float(np.finfo(np.float32).eps)

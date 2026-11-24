@@ -34,6 +34,7 @@ tabulated form. Which form is in use is a provenance fact about every rendered
 frame, so :attr:`HwoSimSpeckleField.drift_is_tabulated` reports it.
 """
 
+import math
 from pathlib import Path
 
 import equinox as eqx
@@ -206,6 +207,10 @@ def segment_zernike_series(
     return jnp.asarray(time_s[order]), jnp.asarray(coeffs[order])
 
 
+def _optional_float_leaf(value):
+    return None if value is None else as_float_leaf(value)
+
+
 class HwoSimSpeckleField(AbstractSpeckleField):
     """Speckle field driven by an hwo_sim linear E-field model.
 
@@ -227,10 +232,16 @@ class HwoSimSpeckleField(AbstractSpeckleField):
     quietly corrupts the drift. The tabulated form has the same exposure
     through its interpolation abscissa. :meth:`max_safe_elapsed_s` reports
     the limit for whichever form is loaded.
+
+    ``epoch_d`` is a static host binary64 float, so a field built at an
+    absolute epoch keeps it exactly. :meth:`coefficients` subtracts it from a
+    concrete ``time_d`` on the host, in binary64, before reducing precision;
+    a traced ``time_d`` is already in the active dtype, so pass relative times
+    or enable x64 when tracing absolute ones.
     """
 
     grid: PixelGrid
-    epoch_d: Array = eqx.field(converter=as_float_leaf)
+    epoch_d: float = eqx.field(static=True, converter=float)
     wavelengths_nm: Array
     e_nom: Array  # complex (num_wl, num_pix): nominal field on the pixel list
     gain: Array  # complex (num_wl, num_pix, num_mode): d(E)/d(mode), flat modes
@@ -292,7 +303,7 @@ class HwoSimSpeckleField(AbstractSpeckleField):
         if grid.unit != "lod" or grid.shape != dark_zone.shape:
             raise ValueError("grid must be native lod and match dark_zone")
         self.epoch_d = epoch_d
-        self.wavelengths_nm = jnp.asarray(wavelengths_nm, dtype=float)
+        self.wavelengths_nm = as_float_leaf(wavelengths_nm)
         self.e_nom = jnp.asarray(e_nom)
         # Flat modes, so the drift contracts as a single matrix-vector product
         # per wavelength.
@@ -301,19 +312,17 @@ class HwoSimSpeckleField(AbstractSpeckleField):
             np.flatnonzero(dark_zone.ravel()), dtype=jnp.int32
         )
         self.grid_shape = tuple(int(n) for n in dark_zone.shape)
-        self.amplitude = None if amplitude is None else jnp.asarray(amplitude)
-        self.frequency_hz = None if frequency_hz is None else jnp.asarray(frequency_hz)
-        self.phase = None if phase is None else jnp.asarray(phase)
-        self.drift_time_s = (
-            None if drift_time_s is None else jnp.asarray(drift_time_s, dtype=float)
-        )
-        self.drift_coefficients = (
-            None if drift_coefficients is None else jnp.asarray(drift_coefficients)
-        )
+        self.amplitude = _optional_float_leaf(amplitude)
+        self.frequency_hz = _optional_float_leaf(frequency_hz)
+        self.phase = _optional_float_leaf(phase)
+        self.drift_time_s = _optional_float_leaf(drift_time_s)
+        self.drift_coefficients = _optional_float_leaf(drift_coefficients)
         self.contrast_to_flux_fraction = contrast_to_flux_fraction
 
     def __check_init__(self):
-        """Require exactly one drift form, with consistent shapes."""
+        """Require a finite clock origin and exactly one consistent drift form."""
+        if not math.isfinite(self.epoch_d):
+            raise ValueError("epoch_d must be finite")
         if self.dark_zone_index.shape[0] != self.e_nom.shape[1]:
             raise ValueError(
                 f"dark_zone has {self.dark_zone_index.shape[0]} pixels but e_nom "
@@ -388,7 +397,14 @@ class HwoSimSpeckleField(AbstractSpeckleField):
         The branch is on ``None``-ness, which is PyTree structure rather than
         a traced value, so it resolves at trace time under ``jit``.
         """
-        t = (jnp.asarray(time_d, dtype=float) - self.epoch_d) * d2s
+        if isinstance(time_d, jax.Array):
+            elapsed_d = jnp.asarray(time_d, dtype=float) - self.epoch_d
+        else:
+            # Subtract in binary64 on the host before reducing precision.
+            elapsed_d = jnp.asarray(
+                np.asarray(time_d, dtype=np.float64) - self.epoch_d, dtype=float
+            )
+        t = elapsed_d * d2s
         if self.drift_coefficients is None:
             wave = self.amplitude * jnp.cos(
                 2.0 * jnp.pi * self.frequency_hz * t + self.phase
@@ -449,11 +465,12 @@ class HwoSimSpeckleField(AbstractSpeckleField):
     ) -> "HwoSimSpeckleField":
         """Copy with a new sinusoid drift realization, reusing the field arrays.
 
-        Rebuilding through ``__init__`` would re-upload the gain matrix, which
-        is hundreds of megabytes at full size. This swaps only the drift
-        leaves, so an independent wavefront realization per visit is cheap.
-        That is the right model for revisits separated by more than the drift
-        correlation time.
+        The copy is rebuilt through the constructor, since ``epoch_d`` is a
+        static field that ``eqx.tree_at`` cannot replace. The stored arrays
+        pass through unchanged and uncopied, so the gain matrix, hundreds of
+        megabytes at full size, is never uploaded again and an independent
+        wavefront realization per visit is cheap. That is the right model for
+        revisits separated by more than the drift correlation time.
 
         Args:
             epoch_d: New clock origin. None keeps the current one.
@@ -474,22 +491,11 @@ class HwoSimSpeckleField(AbstractSpeckleField):
                 "this field carries a tabulated drift; use with_tabulated_drift "
                 "to point it at a different window or series."
             )
-        updates = {
-            "epoch_d": as_float_leaf(self.epoch_d if epoch_d is None else epoch_d),
-            "amplitude": self.amplitude
-            if amplitude is None
-            else jnp.asarray(amplitude),
-            "frequency_hz": (
-                self.frequency_hz if frequency_hz is None else jnp.asarray(frequency_hz)
-            ),
-            "phase": self.phase if phase is None else jnp.asarray(phase),
-        }
-        return eqx.tree_at(
-            lambda s: (s.epoch_d, s.amplitude, s.frequency_hz, s.phase),
-            self,
-            tuple(
-                updates[k] for k in ("epoch_d", "amplitude", "frequency_hz", "phase")
-            ),
+        return self._rebuild(
+            epoch_d=self.epoch_d if epoch_d is None else epoch_d,
+            amplitude=self.amplitude if amplitude is None else amplitude,
+            frequency_hz=self.frequency_hz if frequency_hz is None else frequency_hz,
+            phase=self.phase if phase is None else phase,
         )
 
     def with_tabulated_drift(
@@ -525,25 +531,33 @@ class HwoSimSpeckleField(AbstractSpeckleField):
                 "this field carries a sinusoid drift; use with_drift, or "
                 "construct a new field with drift_coefficients."
             )
-        t_new = (
-            self.drift_time_s
-            if drift_time_s is None
-            else jnp.asarray(drift_time_s, dtype=float)
+        return self._rebuild(
+            epoch_d=self.epoch_d if epoch_d is None else epoch_d,
+            drift_time_s=self.drift_time_s if drift_time_s is None else drift_time_s,
+            drift_coefficients=(
+                self.drift_coefficients
+                if drift_coefficients is None
+                else drift_coefficients
+            ),
         )
-        c_new = (
-            self.drift_coefficients
-            if drift_coefficients is None
-            else jnp.asarray(drift_coefficients)
-        )
-        if t_new.shape[0] != c_new.shape[0]:
-            raise ValueError(
-                f"drift_time_s has {t_new.shape[0]} samples but "
-                f"drift_coefficients has {c_new.shape[0]}"
-            )
-        return eqx.tree_at(
-            lambda s: (s.epoch_d, s.drift_time_s, s.drift_coefficients),
-            self,
-            (as_float_leaf(self.epoch_d if epoch_d is None else epoch_d), t_new, c_new),
+
+    def _rebuild(self, *, epoch_d, **drift) -> "HwoSimSpeckleField":
+        """Construct a copy with a new clock origin and drift, same field arrays.
+
+        The constructor converts and validates the drift, and passes the
+        stored field arrays through without copying them.
+        """
+        dark_zone = np.zeros(math.prod(self.grid_shape), dtype=bool)
+        dark_zone[np.asarray(self.dark_zone_index)] = True
+        return type(self)(
+            self.e_nom,
+            self.gain,
+            dark_zone.reshape(self.grid_shape),
+            wavelengths_nm=self.wavelengths_nm,
+            grid=self.grid,
+            epoch_d=epoch_d,
+            contrast_to_flux_fraction=self.contrast_to_flux_fraction,
+            **drift,
         )
 
     def max_safe_elapsed_s(
