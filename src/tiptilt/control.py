@@ -100,19 +100,18 @@ class DarkZoneModel(eqx.Module):
             return data[self.mask]
         return data[:, self.mask].reshape(-1)
 
-    def contrast(self, data):
-        """Weight-averaged mean dark-zone intensity (broadband contrast).
+    def weighted_contrast(self, weighted):
+        """Pixel- and spectrum-weighted mean dark-zone intensity.
 
-        Averaged over the pixel axis with ``pixel_weights`` (uniform weights
-        reduce to the plain mean) and over the wavelength axis with the
-        spectrum weights.
+        Args:
+            weighted: Field already multiplied by ``stack_weights``, either
+                complex or stacked as its real parts followed by its imaginary parts.
         """
-        pixel_w = self.pixel_weights
-        denom = jnp.sum(pixel_w)
-        if data.ndim == 2:
-            return jnp.sum(pixel_w * jnp.abs(data[self.mask]) ** 2) / denom
-        intensity = jnp.abs(data[:, self.mask]) ** 2  # (nlam, n_dz)
-        return jnp.sum(pixel_w * jnp.tensordot(self.weights, intensity, axes=1)) / denom
+        return jnp.sum(jnp.abs(weighted) ** 2) / jnp.sum(self.pixel_weights)
+
+    def contrast(self, data):
+        """Pixel- and spectrum-weighted mean dark-zone intensity of focal data."""
+        return self.weighted_contrast(self.weighted_dark_zone(data))
 
     @classmethod
     def build(
@@ -326,17 +325,16 @@ class StrokeMinController(AbstractController):
     Attributes:
         response: Stacked real Jacobian rows ``[Re g_dz; Im g_dz]``.
         rtr: Its Gram matrix.
-        stack_weights: The model's stacked sqrt weights.
-        n_dark: Dark-zone pixel count (contrast normalization).
+        model: Dark-zone model supplying the stack weights and contrast metric.
         mu_grid: Candidate multipliers, ascending.
-        target_contrast: The contrast the step tries to reach.
+        target_contrast: Target in units of ``DarkZoneModel.contrast``, the
+            pixel-weighted mean intensity (plain pixel mean for uniform weights).
         gain: Step gain on the chosen delta.
     """
 
     response: Array
     rtr: Array
-    stack_weights: Array
-    n_dark: int = eqx.field(static=True)
+    model: DarkZoneModel
     mu_grid: Array
     target_contrast: Array = eqx.field(converter=as_float_leaf)
     gain: Array = eqx.field(converter=as_float_leaf)
@@ -347,7 +345,8 @@ class StrokeMinController(AbstractController):
 
         Args:
             model: The ``DarkZoneModel``.
-            target_contrast: Dark-zone mean intensity to reach per step.
+            target_contrast: Target in units of ``DarkZoneModel.contrast``, the
+                pixel-weighted mean intensity (plain pixel mean for uniform weights).
             mu_grid: Candidate Lagrange multipliers (ascending); defaults to
                 a wide log grid.
             gain: Step gain on the chosen delta.
@@ -359,20 +358,28 @@ class StrokeMinController(AbstractController):
             mu_grid = jnp.logspace(-12, 0, 13)
         _require_jacobian(model, "StrokeMinController")
         response = jnp.concatenate([jnp.real(model.g_dz), jnp.imag(model.g_dz)], axis=0)
-        n_dark = int(jnp.sum(model.mask))
         return cls(
             response=response,
             rtr=response.T @ response,
-            stack_weights=model.stack_weights,
-            n_dark=n_dark,
+            model=model,
             mu_grid=jnp.asarray(mu_grid),
             target_contrast=target_contrast,
             gain=gain,
         )
 
+    def contrast(self, estimate):
+        """Pixel- and spectrum-weighted mean intensity of an unweighted estimate.
+
+        Args:
+            estimate: Complex dark-zone field, flat or shaped ``(nlam, n_dark)``.
+        """
+        return self.model.weighted_contrast(
+            self.model.stack_weights * estimate.reshape(-1)
+        )
+
     def command_delta(self, estimate):
         """Pick the least-stroke multiplier that meets the target contrast."""
-        weighted = self.stack_weights * estimate.reshape(-1)
+        weighted = self.model.stack_weights * estimate.reshape(-1)
         residual = jnp.concatenate([jnp.real(weighted), jnp.imag(weighted)])
         rhs = self.response.T @ residual
         eye = jnp.eye(self.rtr.shape[0])
@@ -380,8 +387,7 @@ class StrokeMinController(AbstractController):
         def candidate(mu):
             delta = -jnp.linalg.solve(self.rtr + mu * eye, rhs)
             predicted = residual + self.response @ delta
-            contrast = jnp.sum(jnp.abs(predicted) ** 2) / self.n_dark
-            return delta, contrast
+            return delta, self.model.weighted_contrast(predicted)
 
         deltas, contrasts = jax.vmap(candidate)(self.mu_grid)
         feasible = contrasts <= self.target_contrast

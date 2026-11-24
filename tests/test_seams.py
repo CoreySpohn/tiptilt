@@ -1,5 +1,6 @@
 """Tests for the estimator/controller seams (DarkZoneModel and the laws)."""
 
+import ineedvalidation as vv
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -100,7 +101,71 @@ class TestEFCController:
         assert float(history[-1]) < 1e-3 * float(history[0])
 
 
+def _two_pixel_model(pixel_weights, spectrum=(1.0,)):
+    """One unit-response mode per pixel at each wavelength."""
+    pixel = jnp.asarray(pixel_weights)
+    spectrum = jnp.asarray(spectrum)
+    stack = jnp.sqrt(spectrum[:, None] * pixel).reshape(-1)
+    response = jnp.tile(jnp.eye(2, dtype=complex), (spectrum.size, 1))
+    return DarkZoneModel(
+        path=OpticalPath(stages=()),
+        indices=(),
+        split_points=(),
+        mask=jnp.ones((1, 2), dtype=bool),
+        weights=spectrum,
+        sqrt_weights=jnp.sqrt(spectrum),
+        pixel_weights=pixel,
+        stack_weights=stack,
+        g_dz=stack[:, None] * response,
+        operating_point=jnp.zeros(2),
+    )
+
+
 class TestStrokeMinController:
+    def test_nonuniform_target_uses_model_contrast(self):
+        """Exact-algebra: the initial weighted mean is 0.202 / 1.01 = 0.2.
+
+        Dividing by two pixels makes a near-zero correction appear feasible.
+        """
+        model = _two_pixel_model([1, 0.01])
+        target = 0.15
+        controller = StrokeMinController.build(
+            model, target_contrast=target, mu_grid=[1, 1e6]
+        )
+        data = jnp.asarray([[np.sqrt(0.202), 0j]])
+        estimate = model.dark_zone_unweighted(data)
+        contrast = controller.contrast(estimate)
+        assert contrast == model.contrast(data)
+        np.testing.assert_allclose(contrast, 0.2, atol=1e-12, rtol=0)
+        _, delta = controller.command_delta(estimate)
+        assert model.contrast(data + delta) <= target
+
+    @pytest.mark.parametrize("scale", [1.0, 3.0])
+    def test_uniform_weight_scale_preserves_mean(self, scale):
+        """Exact-algebra: intensities 2 and 4 have a uniform mean of 3.
+
+        Dividing by the pixel count retains the common weight scale.
+        """
+        model = _two_pixel_model([scale, scale])
+        controller = StrokeMinController.build(model, target_contrast=1.0)
+        estimate = jnp.asarray([1 + 1j, -2j])
+        np.testing.assert_allclose(controller.contrast(estimate), 3, rtol=1e-12, atol=0)
+
+    @vv.seam("tiptilt.DarkZoneModel", "tiptilt.StrokeMinController")
+    def test_known_dark_zone_intensity(self):
+        """Analytic: a field of modulus sqrt(1e-9) has intensity 1e-9.
+
+        A factor in either contrast conversion changes the absolute intensity.
+        """
+        model = _two_pixel_model([1, 1], spectrum=(0.25, 0.75))
+        controller = StrokeMinController.build(model, target_contrast=1e-9)
+        data = np.sqrt(1e-9) * jnp.asarray([[[1, 1j]], [[-1j, -1]]])
+        estimate = data[:, model.mask]
+        np.testing.assert_allclose(model.contrast(data), 1e-9, rtol=1e-12, atol=0)
+        np.testing.assert_allclose(
+            controller.contrast(estimate), 1e-9, rtol=1e-12, atol=0
+        )
+
     def test_meets_target_with_less_stroke_than_efc(self):
         path, field, mask = _setup()
         model = DarkZoneModel.build(path, 0, mask, jacobian_field=field)
@@ -242,8 +307,8 @@ def _z2():
 _LEAF_CASES = {
     "efc": (_efc, ["gain"]),
     "stroke": (
-        lambda cast: StrokeMinController(
-            _z2(), _z2(), jnp.ones(2), 1, jnp.ones(3), cast(1e-8), cast(0.7)
+        lambda cast: StrokeMinController.build(
+            _two_pixel_model([1.0, 1.0]), target_contrast=cast(1e-8), gain=cast(0.7)
         ),
         ["target_contrast", "gain"],
     ),
