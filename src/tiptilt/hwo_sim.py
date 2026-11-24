@@ -535,25 +535,27 @@ class HwoSimSpeckleField(AbstractSpeckleField):
 
         The supplied drift arrays go in through ``eqx.tree_at`` after the same
         conversion the constructor applies. ``epoch_d`` is a static field,
-        which ``eqx.tree_at`` cannot reach, so it is set on a shallow copy the
-        way Equinox's own unflattening sets fields. The class checks then run
-        on the result, as the constructor would run them.
+        which ``eqx.tree_at`` cannot reach, so it is set on a fresh object the
+        way Equinox's own unflattening sets fields. The result is always a new
+        object, even with nothing supplied, and this field is never changed.
+        The class checks then run on the result, as the constructor would run
+        them.
         """
         supplied = {
             name: as_float_leaf(value)
             for name, value in drift.items()
             if value is not None
         }
-        new = self
         if supplied:
             names = tuple(supplied)
             new = eqx.tree_at(
                 lambda f: tuple(getattr(f, name) for name in names),
-                new,
+                self,
                 tuple(supplied.values()),
             )
+        else:
+            new = copy.copy(self)
         if epoch_d is not None:
-            new = copy.copy(new)
             object.__setattr__(new, "epoch_d", float(epoch_d))
         for cls in type(new).__mro__:
             check = cls.__dict__.get("__check_init__")

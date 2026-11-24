@@ -294,8 +294,10 @@ class TestHwoSimSpeckleField:
         """Fails if re-anchoring drops, converts or copies an untouched field.
 
         Covers an unused ``drift_time_s`` kept on a sinusoid field, a pure
-        re-anchor, and an amplitude swap traced inside ``eqx.filter_jit`` (a
-        host round trip on the dark-zone index raises there). Truth source:
+        re-anchor (a new object; the source keeps its epoch), a call with
+        nothing supplied (still a new object), and an amplitude swap traced
+        inside ``eqx.filter_jit`` (a host round trip on the dark-zone index
+        raises there). Truth source:
         the original field; every array other than the swapped drift is
         bitwise equal and the gain is not copied. Exact comparisons, except the
         doubled read, which is linear in the amplitude.
@@ -311,7 +313,11 @@ class TestHwoSimSpeckleField:
         )
         anchored = field.with_drift(epoch_d=2.0)
         assert anchored.epoch_d == 2.0
+        assert anchored is not field and field.epoch_d == 0.0
         _assert_bitwise_equal_except(anchored, field, ())
+        unchanged = field.with_drift()
+        assert unchanged is not field
+        _assert_bitwise_equal_except(unchanged, field, ())
         traced = eqx.filter_jit(lambda f, a: f.with_drift(amplitude=a))(
             field, 3.0 * field.amplitude
         )
@@ -345,8 +351,12 @@ class TestHwoSimSpeckleField:
         )
         anchored = field.with_tabulated_drift(epoch_d=2.5)
         assert anchored.epoch_d == 2.5
+        assert anchored is not field and field.epoch_d == 0.0
         assert anchored.gain is field.gain
         _assert_bitwise_equal_except(anchored, field, ())
+        unchanged = field.with_tabulated_drift()
+        assert unchanged is not field
+        _assert_bitwise_equal_except(unchanged, field, ())
         with pytest.raises(ValueError, match="samples"):
             field.with_tabulated_drift(drift_coefficients=table[:2])
         with pytest.raises(ValueError, match="sinusoid"):
