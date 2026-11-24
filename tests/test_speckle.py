@@ -520,7 +520,10 @@ def test_fields_run_on_their_own_clock(build, scale, x64):
     interface's own, and a positional time or a ``time_d`` keyword raises.
     Eager against ``eqx.filter_jit``: tolerance basis floating-point, 8 eps of
     ``scale``, the sum over terms of amplitude times (1 + cosine argument),
-    because the compiled program contracts multiply-adds (one rounding fewer).
+    for the coefficients and 64 eps of the largest pixel for the images,
+    because the compiled program contracts multiply-adds (one rounding fewer);
+    an error only one execution mode makes (a traced-only image scaling)
+    fails it.
     The times are off the float32 grid, so a branch that casts a JAX array
     through float32 fails the x64 comparison.
     """
@@ -533,7 +536,8 @@ def test_fields_run_on_their_own_clock(build, scale, x64):
         realize = eqx.filter_jit(
             lambda field, t: field.realize(wavelength_nm=500.0, elapsed_s=t).data
         )
-        floor = 8 * float(jnp.finfo(jnp.float64 if x64 else jnp.float32).eps) * scale
+        eps = float(jnp.finfo(jnp.float64 if x64 else jnp.float32).eps)
+        floor = 8 * eps * scale
         for elapsed in (0.0, 7.1, 13.3):
             reference = zero.coefficients(elapsed_s=elapsed)
             for form in (float, np.asarray, jnp.asarray):
@@ -544,11 +548,16 @@ def test_fields_run_on_their_own_clock(build, scale, x64):
                 compiled = coefficients(zero, t)
                 np.testing.assert_array_equal(coefficients(anchored, t), compiled)
                 np.testing.assert_allclose(compiled, eager, rtol=0, atol=floor)
+                image = zero.realize(wavelength_nm=500.0, elapsed_s=t).data
                 np.testing.assert_array_equal(
-                    anchored.realize(wavelength_nm=500.0, elapsed_s=t).data,
-                    zero.realize(wavelength_nm=500.0, elapsed_s=t).data,
+                    anchored.realize(wavelength_nm=500.0, elapsed_s=t).data, image
                 )
-                np.testing.assert_array_equal(realize(anchored, t), realize(zero, t))
+                compiled_image = realize(zero, t)
+                np.testing.assert_array_equal(realize(anchored, t), compiled_image)
+                image_floor = 64 * eps * np.max(np.abs(image))
+                np.testing.assert_allclose(
+                    compiled_image, image, rtol=0, atol=image_floor
+                )
         with pytest.raises(TypeError):
             anchored.coefficients(1.0)
         with pytest.raises(TypeError):

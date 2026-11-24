@@ -295,7 +295,8 @@ class TestHwoSimSpeckleField:
 
         Covers an unused ``drift_time_s`` kept on a sinusoid field, a pure
         re-anchor (a new object; the source keeps its epoch), a call with
-        nothing supplied (still a new object), and an amplitude swap traced
+        nothing supplied (still a new object, keeping a nonzero epoch on an
+        already anchored field), and an amplitude swap traced
         inside ``eqx.filter_jit`` (a host round trip on the dark-zone index
         raises there). Truth source:
         the original field; every array other than the swapped drift is
@@ -318,6 +319,9 @@ class TestHwoSimSpeckleField:
         unchanged = field.with_drift()
         assert unchanged is not field
         _assert_bitwise_equal_except(unchanged, field, ())
+        again = anchored.with_drift()
+        assert again is not anchored and again.epoch_d == 2.0
+        _assert_bitwise_equal_except(again, anchored, ())
         traced = eqx.filter_jit(lambda f, a: f.with_drift(amplitude=a))(
             field, 3.0 * field.amplitude
         )
@@ -332,7 +336,9 @@ class TestHwoSimSpeckleField:
         """Fails if the tabulated copy drops a field or loses the new epoch.
 
         The unused sinusoid ``frequency_hz`` and ``phase`` supplied with the
-        series must survive, and ``amplitude`` must stay None. Truth source:
+        series must survive, ``amplitude`` must stay None, and a call with
+        nothing supplied keeps a nonzero epoch on an already anchored field.
+        Truth source:
         the original field and the negated series. Exact comparisons, except
         the interpolated read, which is linear in the table.
         """
@@ -357,6 +363,9 @@ class TestHwoSimSpeckleField:
         unchanged = field.with_tabulated_drift()
         assert unchanged is not field
         _assert_bitwise_equal_except(unchanged, field, ())
+        again = anchored.with_tabulated_drift()
+        assert again is not anchored and again.epoch_d == 2.5
+        _assert_bitwise_equal_except(again, anchored, ())
         with pytest.raises(ValueError, match="samples"):
             field.with_tabulated_drift(drift_coefficients=table[:2])
         with pytest.raises(ValueError, match="sinusoid"):
