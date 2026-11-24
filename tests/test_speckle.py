@@ -515,7 +515,8 @@ def test_fields_run_on_their_own_clock(build, scale, x64):
 
     Truth: the same field anchored at zero. Two fields that differ only in
     ``epoch_d`` (0 and 60000.123) give bitwise equal coefficients and images
-    at each elapsed second, eagerly and compiled. The kernel is the
+    at each elapsed second, eagerly and compiled, for a Python float, a NumPy
+    array and a JAX array on both sides. The kernel is the
     interface's own, and a positional time or a ``time_d`` keyword raises.
     Eager against ``eqx.filter_jit``: tolerance basis floating-point, 8 eps of
     ``scale``, the sum over terms of amplitude times (1 + cosine argument),
@@ -534,23 +535,20 @@ def test_fields_run_on_their_own_clock(build, scale, x64):
         )
         floor = 8 * float(jnp.finfo(jnp.float64 if x64 else jnp.float32).eps) * scale
         for elapsed in (0.0, 7.1, 13.3):
-            eager = zero.coefficients(elapsed_s=elapsed)
-            np.testing.assert_array_equal(
-                anchored.coefficients(elapsed_s=elapsed), eager
-            )
-            compiled = coefficients(zero, jnp.asarray(elapsed))
-            np.testing.assert_array_equal(
-                coefficients(anchored, jnp.asarray(elapsed)), compiled
-            )
-            np.testing.assert_allclose(compiled, eager, rtol=0, atol=floor)
-            np.testing.assert_array_equal(
-                anchored.realize(wavelength_nm=500.0, elapsed_s=elapsed).data,
-                zero.realize(wavelength_nm=500.0, elapsed_s=elapsed).data,
-            )
-            np.testing.assert_array_equal(
-                realize(anchored, jnp.asarray(elapsed)),
-                realize(zero, jnp.asarray(elapsed)),
-            )
+            reference = zero.coefficients(elapsed_s=elapsed)
+            for form in (float, np.asarray, jnp.asarray):
+                t = form(elapsed)
+                eager = zero.coefficients(elapsed_s=t)
+                np.testing.assert_array_equal(eager, reference)
+                np.testing.assert_array_equal(anchored.coefficients(elapsed_s=t), eager)
+                compiled = coefficients(zero, t)
+                np.testing.assert_array_equal(coefficients(anchored, t), compiled)
+                np.testing.assert_allclose(compiled, eager, rtol=0, atol=floor)
+                np.testing.assert_array_equal(
+                    anchored.realize(wavelength_nm=500.0, elapsed_s=t).data,
+                    zero.realize(wavelength_nm=500.0, elapsed_s=t).data,
+                )
+                np.testing.assert_array_equal(realize(anchored, t), realize(zero, t))
         with pytest.raises(TypeError):
             anchored.coefficients(1.0)
         with pytest.raises(TypeError):
