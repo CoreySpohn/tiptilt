@@ -11,6 +11,8 @@ from tiptilt.maintenance import make_detector
 from tiptilt.sensing import zwfs_reconstruct
 from tiptilt.testbed import pointing_jitter, run
 
+pytestmark = pytest.mark.float64_only(reason="low-order wavefront control")
+
 
 @pytest.fixture(scope="module")
 def scenario():

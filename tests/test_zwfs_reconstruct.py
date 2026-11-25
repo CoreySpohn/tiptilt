@@ -2,11 +2,14 @@
 
 import jax.numpy as jnp
 import numpy as np
+import pytest
 from optixstuff.grids import PixelGrid
 from physicaloptix import Field, PlaneKind, ZernikeWavefrontSensor, zernike_basis
 from physicaloptix.elements.basis import ModeBasis
 
 from tiptilt.sensing import zwfs_calibrate, zwfs_reconstruct
+
+pytestmark = pytest.mark.float64_only(reason="wavefront sensing for control")
 
 WL = 500.0
 NPUP = 48

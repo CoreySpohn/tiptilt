@@ -29,6 +29,8 @@ from tiptilt.control import (
 )
 from tiptilt.sensing import probe_set
 
+pytestmark = pytest.mark.float64_only(reason="wavefront control")
+
 WL = 500.0
 _KS = [(3, 1), (3, 0), (3, 2), (2, 1), (4, 1), (3, -1)]
 # A richer symmetric set around the (3, 0) speckle for the two-DM demonstration.

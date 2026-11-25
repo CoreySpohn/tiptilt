@@ -25,6 +25,8 @@ from tiptilt.multichannel import (
     shared_dm_command,
 )
 
+pytestmark = pytest.mark.float64_only(reason="wavefront control")
+
 WL, NPIX = 500.0, 16
 
 

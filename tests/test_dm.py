@@ -128,6 +128,7 @@ class TestDeformableMirror:
         )
 
     @pytest.mark.slow
+    @pytest.mark.float64_only(reason="wavefront control")
     def test_actuator_dm_digs_a_dark_hole_with_the_existing_driver(self):
         """The device drops into close_dark_hole unchanged: its screen is a
         PhaseScreen, its coefficients are per-actuator strokes."""
@@ -198,6 +199,7 @@ class TestActuatorLattice:
         # actuator center (a half-pixel miss would read 0.977).
         assert surface.max() == pytest.approx(1.0, rel=2e-3)
 
+    @pytest.mark.float64_only(reason="wavefront control")
     def test_actuator_dm_is_a_phase_screen_that_the_driver_commands(self):
         """Fails if the driver or shared trunk cannot command an implicit lattice."""
         npix = 32
@@ -292,6 +294,7 @@ class TestHardwareDM:
         assert not jnp.allclose(one_step(field).data, flat(field).data)
         del exact
 
+    @pytest.mark.float64_only(reason="wavefront-control command Jacobian")
     def test_jacobian_keeps_gains_and_straight_through_quantizer(self):
         """Fails if command derivatives skip hardware gains or round tangents."""
         from tiptilt.control import DarkZoneModel
@@ -325,6 +328,7 @@ class TestHardwareDM:
             shared["science"].g_shared[:, mask].T, g_hw, atol=1e-12
         )
 
+    @pytest.mark.float64_only(reason="wavefront-control command Jacobian")
     def test_dead_actuator_ignores_command_and_zeroes_jacobian(self):
         from tiptilt.control import DarkZoneModel
 
@@ -375,6 +379,7 @@ class TestHardwareDM:
             _pupil_setup(actuator_gains=jnp.ones(3))
 
 
+@pytest.mark.float64_only(reason="wavefront control")
 class TestHardwareScenarios:
     def test_quantization_floor_ordering(self):
         from tiptilt.testbed import hardware_dm, run
