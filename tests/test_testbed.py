@@ -71,15 +71,10 @@ class TestMaintainScenario:
 
 
 class TestMultichannelScenarios:
-    @pytest.mark.xfail(
-        strict=True,
-        raises=ValueError,
-        reason="needs the physicaloptix float32 energy check fix",
-    )
     def test_wfs_plus_science_builds_in_float32(self):
         """Fails if the splitter rejects its lossless split in float32."""
         with jax.enable_x64(False):
-            wfs_plus_science(npix=2, n_steps=1)
+            wfs_plus_science(npix=16, n_steps=1)
 
     @pytest.mark.slow
     def test_aliasing_scenario_measures_the_injection(self):
