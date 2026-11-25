@@ -697,7 +697,10 @@ class TestPixelWeights:
 
     def test_w3_spectral_and_pixel_weights_compose(self):
         """W3: the two axes multiply into stack_weights as
-        sqrt(spectrum * pixel), and mono + uniform recovers W0's stacking."""
+        sqrt(spectrum * pixel), and mono + uniform recovers W0's stacking.
+
+        Fails if scoring a single wavelength slice applies spectral weights.
+        """
         path, field, mask, _ = _weighted_setup()
         n_dz = int(jnp.sum(mask))
         rng = np.random.default_rng(0)
@@ -719,6 +722,14 @@ class TestPixelWeights:
         np.testing.assert_allclose(
             np.asarray(mono.stack_weights), np.ones(n_dz), rtol=1e-12
         )
+
+        stack = model.focal_of(model.operating_point, band)
+        for focal_slice in stack:
+            intensity = np.abs(np.asarray(focal_slice)[mask]) ** 2
+            expected_contrast = np.average(intensity, weights=pixel)
+            np.testing.assert_allclose(
+                model.contrast(focal_slice), expected_contrast, rtol=1e-12
+            )
 
     def test_rejects_wrong_shaped_weights(self):
         path, field, mask, _ = _weighted_setup()
