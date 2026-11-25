@@ -239,7 +239,9 @@ class DarkZoneModel(eqx.Module):
         return self.g_dz.shape[0] > 0
 
     def weighted_dark_zone(self, data):
-        """The sqrt-weighted stacked dark-zone vector (the Jacobian's rows)."""
+        """The sqrt-weighted dark-zone vector for a slice or spectral stack."""
+        if data.ndim == 2:
+            return jnp.sqrt(self.pixel_weights) * data[self.mask]
         return self.stack_weights * self.dark_zone_unweighted(data)
 
 
