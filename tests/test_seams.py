@@ -75,6 +75,7 @@ def _run(model, field, sensor, controller, n_steps):
     return command, jnp.stack(history), sensor, controller
 
 
+@pytest.mark.float64_only(reason="wavefront control")
 class TestEFCController:
     def test_command_delta_matches_the_manual_formula(self):
         path, field, mask = _setup()
@@ -121,6 +122,7 @@ def _two_pixel_model(pixel_weights, spectrum=(1.0,)):
     )
 
 
+@pytest.mark.float64_only(reason="wavefront control")
 class TestStrokeMinController:
     def test_nonuniform_target_uses_model_contrast(self):
         """Exact-algebra: the initial weighted mean is 0.202 / 1.01 = 0.2.
@@ -182,6 +184,7 @@ class TestStrokeMinController:
         assert float(hist_efc[-1]) < float(hist_stroke[-1])  # EFC digs deeper
 
 
+@pytest.mark.float64_only(reason="wavefront control")
 class TestPredictiveController:
     def test_alpha_zero_matches_efc(self):
         path, field, mask = _setup()
@@ -214,6 +217,7 @@ class TestPredictiveController:
         )
 
 
+@pytest.mark.float64_only(reason="wavefront sensing for control")
 class TestKalmanEstimatorState:
     def test_state_advances_per_call(self):
         path, field, mask = _setup()
@@ -239,6 +243,7 @@ class TestKalmanEstimatorState:
         assert int(sensor3.step_index) == 2
 
 
+@pytest.mark.float64_only(reason="wavefront-control command Jacobian")
 class TestDarkZoneModelOperatingPoint:
     def test_jacobian_rotates_with_the_base_point(self):
         """The Jacobian at a nonzero command differs from the cold one (the
@@ -346,23 +351,16 @@ _LEAF_CASES = {
 }
 
 
-@pytest.mark.parametrize(
-    ("x64", "source"), [(False, np.float64), (True, np.float32)], ids=["x32", "x64"]
-)
 @pytest.mark.parametrize("case", _LEAF_CASES)
-def test_converted_fields_are_strong_leaves(case, x64, source):
-    """A NumPy value given at construction is stored as a strongly typed array
-    of the active dtype (float32 under x32, float64 under x64, int32 for the
-    probe counter under x32), whatever its own float width. Truth source: the
-    leaf rule; no tolerance, dtypes are exact."""
+def test_converted_fields_are_strong_leaves(case, precision):
+    """A host value takes the lane's dtype even when its original width differs."""
     build, names = _LEAF_CASES[case]
-    with jax.enable_x64(x64):
-        module = build(lambda value: np.asarray(value, dtype=source))
-        active = jnp.float64 if x64 else jnp.float32
-        for name in names:
-            leaf = getattr(module, name)
-            integer = jax.dtypes.canonicalize_dtype(int)
-            expected = integer if name == "step_index" else active
-            assert isinstance(leaf, jax.Array), name
-            assert leaf.dtype == expected, name
-            assert not leaf.weak_type, name
+    source = np.float32 if precision == np.float64 else np.float64
+    module = build(lambda value: np.asarray(value, dtype=source))
+    integer = np.int64 if precision == np.float64 else np.int32
+    for name in names:
+        leaf = getattr(module, name)
+        expected = integer if name == "step_index" else precision
+        assert isinstance(leaf, jax.Array), name
+        assert leaf.dtype == expected, name
+        assert not leaf.weak_type, name

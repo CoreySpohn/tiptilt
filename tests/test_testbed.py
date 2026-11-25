@@ -4,6 +4,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
+from hwoutils.precision import complex_of
 
 from tiptilt.testbed import (
     ALGORITHMS,
@@ -36,6 +37,7 @@ class TestMetrics:
         assert metrics.saturated
 
 
+@pytest.mark.float64_only(reason="wavefront control")
 class TestDigScenarios:
     @pytest.mark.slow
     def test_oracle_digs_deeper_than_pairwise(self):
@@ -61,6 +63,7 @@ class TestDigScenarios:
         assert result.metrics.saturated
 
 
+@pytest.mark.float64_only(reason="wavefront control")
 class TestMaintainScenario:
     @pytest.mark.slow
     def test_maintenance_holds_what_open_loop_loses(self):
@@ -71,12 +74,18 @@ class TestMaintainScenario:
 
 
 class TestMultichannelScenarios:
-    def test_wfs_plus_science_builds_in_float32(self):
-        """Fails if the splitter rejects its lossless split in float32."""
-        with jax.enable_x64(False):
-            wfs_plus_science(npix=16, n_steps=1)
+    def test_wfs_plus_science_builds_in_both_precisions(self, precision):
+        """Fails if splitter roundoff rejects a lossless split in either dtype."""
+        scenario = wfs_plus_science(npix=16, n_steps=1)
+        assert scenario.params["input_field"].data.dtype == complex_of(precision)
+
+        other_precision = np.float32 if precision == np.float64 else np.float64
+        with jax.enable_x64(other_precision == np.float64):
+            other = wfs_plus_science(npix=16, n_steps=1)
+        assert other.params["input_field"].data.dtype == complex_of(other_precision)
 
     @pytest.mark.slow
+    @pytest.mark.float64_only(reason="wavefront control")
     def test_aliasing_scenario_measures_the_injection(self):
         scenario = wfs_private_aliasing()
         aliased = run(scenario, "feedforward")
@@ -86,6 +95,7 @@ class TestMultichannelScenarios:
         )
 
     @pytest.mark.slow
+    @pytest.mark.float64_only(reason="wavefront control")
     def test_common_mode_rejection(self):
         scenario = dual_science_common_mode()
         held = run(scenario, "feedforward")
@@ -96,6 +106,7 @@ class TestMultichannelScenarios:
 
 class TestSweep:
     @pytest.mark.slow
+    @pytest.mark.float64_only(reason="wavefront control")
     def test_sweep_produces_a_metrics_table(self):
         table = sweep(
             {"dig": dig_from_cold()},
@@ -116,6 +127,7 @@ class TestSweep:
         assert "oracle-efc" in ALGORITHMS
 
 
+@pytest.mark.float64_only(reason="wavefront control")
 class TestUserExtension:
     @pytest.mark.slow
     def test_actuator_dm_scenario_runs_in_actuator_space(self):

@@ -52,6 +52,8 @@ docs = [
 ]
 
 [tool.pytest.ini_options]
+addopts = "-p hwoutils.testing.precision"
+default_precision = "float64"
 filterwarnings = [
     "error",
     # JAX 0.8.x casts complex cotangents to real in mixed-type dot transposes.

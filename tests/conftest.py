@@ -3,7 +3,7 @@
 import importlib.util
 import os
 
-from hwoutils import enable_x64, set_platform
+from hwoutils import set_platform
 from hypothesis import settings
 
 # Released hwoutils versions may not include the optional budget plugin yet.
@@ -17,7 +17,5 @@ settings.register_profile("quick", max_examples=25, deadline=None)
 settings.register_profile("nightly", max_examples=200, deadline=None)
 settings.load_profile(os.environ.get("HYPOTHESIS_PROFILE", "quick"))
 
-# The deep-contrast path is x64-mandatory and the suite must be deterministic:
-# pin tests to CPU x64. Builder runs opt into GPU explicitly outside the suite.
+# Pin the test backend for deterministic results.
 set_platform("cpu")
-enable_x64()

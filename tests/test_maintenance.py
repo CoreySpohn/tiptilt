@@ -90,6 +90,7 @@ def _drift_fn(table, dt_s):
     return drift
 
 
+@pytest.mark.float64_only(reason="wavefront control")
 class TestMaintainDarkHole:
     @pytest.mark.slow
     def test_holds_contrast_a_static_command_loses(self):

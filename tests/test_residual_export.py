@@ -3,6 +3,7 @@
 import equinox as eqx
 import jax.numpy as jnp
 import numpy as np
+import pytest
 from hwoutils.constants import d2s, s2d
 from optixstuff.grids import Frame, PixelGrid
 from optixstuff.speckle import AbstractSpeckleField
@@ -18,6 +19,8 @@ from physicaloptix import (
 
 from tiptilt.control import close_dark_hole
 from tiptilt.maintenance import maintain_dark_hole, maintained_residual_field
+
+pytestmark = pytest.mark.float64_only(reason="export of actively controlled residuals")
 
 WL = 500.0
 _KS = [(3, 1), (3, 0), (2, 1), (4, 1)]

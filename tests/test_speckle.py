@@ -533,8 +533,7 @@ def _hwo_sim(epoch_d):
     [(_tabulated, 2.0), (_hwo_sim, 2 * 1.0 * (1 + 6.4))],
     ids=["tabulated", "hwo_sim"],
 )
-@pytest.mark.parametrize("x64", [False, True], ids=["x32", "x64"])
-def test_fields_run_on_their_own_clock(build, scale, x64):
+def test_fields_run_on_their_own_clock(build, scale, precision):
     """Fails if a field reads ``epoch_d``, overrides the kernel or takes days.
 
     Truth: the same field anchored at zero. Two fields that differ only in
@@ -553,39 +552,36 @@ def test_fields_run_on_their_own_clock(build, scale, x64):
     """
     from optixstuff.speckle import AbstractSpeckleField
 
-    with jax.enable_x64(x64):
-        zero, anchored = build(0.0), build(60000.123)
-        assert type(anchored).elapsed_s is AbstractSpeckleField.elapsed_s
-        coefficients = eqx.filter_jit(lambda field, t: field.coefficients(elapsed_s=t))
-        realize = eqx.filter_jit(
-            lambda field, t: field.realize(wavelength_nm=500.0, elapsed_s=t).data
-        )
-        eps = float(jnp.finfo(jnp.float64 if x64 else jnp.float32).eps)
-        floor = 8 * eps * scale
-        for elapsed in (0.0, 7.1, 13.3):
-            reference = zero.coefficients(elapsed_s=elapsed)
-            for form in (float, np.asarray, jnp.asarray):
-                t = form(elapsed)
-                eager = zero.coefficients(elapsed_s=t)
-                np.testing.assert_array_equal(eager, reference)
-                np.testing.assert_array_equal(anchored.coefficients(elapsed_s=t), eager)
-                compiled = coefficients(zero, t)
-                np.testing.assert_array_equal(coefficients(anchored, t), compiled)
-                np.testing.assert_allclose(compiled, eager, rtol=0, atol=floor)
-                image = zero.realize(wavelength_nm=500.0, elapsed_s=t).data
-                np.testing.assert_array_equal(
-                    anchored.realize(wavelength_nm=500.0, elapsed_s=t).data, image
-                )
-                compiled_image = realize(zero, t)
-                np.testing.assert_array_equal(realize(anchored, t), compiled_image)
-                image_floor = 64 * eps * np.max(np.abs(image))
-                np.testing.assert_allclose(
-                    compiled_image, image, rtol=0, atol=image_floor
-                )
-        with pytest.raises(TypeError):
-            anchored.coefficients(1.0)
-        with pytest.raises(TypeError):
-            anchored.realize(wavelength_nm=500.0, time_d=1.0)
+    zero, anchored = build(0.0), build(60000.123)
+    assert type(anchored).elapsed_s is AbstractSpeckleField.elapsed_s
+    coefficients = eqx.filter_jit(lambda field, t: field.coefficients(elapsed_s=t))
+    realize = eqx.filter_jit(
+        lambda field, t: field.realize(wavelength_nm=500.0, elapsed_s=t).data
+    )
+    eps = float(np.finfo(precision).eps)
+    floor = 8 * eps * scale
+    for elapsed in (0.0, 7.1, 13.3):
+        reference = zero.coefficients(elapsed_s=elapsed)
+        for form in (float, np.asarray, jnp.asarray):
+            t = form(elapsed)
+            eager = zero.coefficients(elapsed_s=t)
+            np.testing.assert_array_equal(eager, reference)
+            np.testing.assert_array_equal(anchored.coefficients(elapsed_s=t), eager)
+            compiled = coefficients(zero, t)
+            np.testing.assert_array_equal(coefficients(anchored, t), compiled)
+            np.testing.assert_allclose(compiled, eager, rtol=0, atol=floor)
+            image = zero.realize(wavelength_nm=500.0, elapsed_s=t).data
+            np.testing.assert_array_equal(
+                anchored.realize(wavelength_nm=500.0, elapsed_s=t).data, image
+            )
+            compiled_image = realize(zero, t)
+            np.testing.assert_array_equal(realize(anchored, t), compiled_image)
+            image_floor = 64 * eps * np.max(np.abs(image))
+            np.testing.assert_allclose(compiled_image, image, rtol=0, atol=image_floor)
+    with pytest.raises(TypeError):
+        anchored.coefficients(1.0)
+    with pytest.raises(TypeError):
+        anchored.realize(wavelength_nm=500.0, time_d=1.0)
 
 
 def test_density_normalization_number_is_unchanged():

@@ -25,6 +25,8 @@ from physicaloptix.elements import SampledOptic
 
 from tiptilt import close_dark_hole, probe_set
 
+pytestmark = pytest.mark.float64_only(reason="deep-contrast vortex dark-hole control")
+
 WL = 500.0
 NPUP = 48
 

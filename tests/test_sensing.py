@@ -3,6 +3,7 @@
 import jax
 import jax.numpy as jnp
 import numpy as np
+import pytest
 from optixstuff.grids import Frame, PixelGrid
 from physicaloptix import (
     Field,
@@ -21,6 +22,8 @@ from tiptilt.sensing import (
     pairwise_estimate,
     probe_set,
 )
+
+pytestmark = pytest.mark.float64_only(reason="wavefront sensing for control")
 
 
 def _simple_dm_path(npix=32, nfoc=64, pscale=0.25, wl=500.0):
