@@ -21,6 +21,8 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 import jax.random as jr
+from hwoutils.leaves import as_float_leaf
+from hwoutils.precision import require_float64
 from physicaloptix import PhaseScreen
 
 from tiptilt.sensing import zwfs_reconstruct
@@ -66,6 +68,7 @@ def lowfs_calibrate(system, input_field, *, arm, stage):
         KeyError: If ``arm`` or ``stage`` does not name a branch / trunk stage.
         TypeError: If the named stage is not a ``PhaseScreen``.
     """
+    require_float64("lowfs_calibrate", system, input_field)
     _branch_check(system, arm)
     index = _trunk_stage_index(system, stage, "calibration")
     optic = system.trunk.stages[index].op
@@ -140,11 +143,14 @@ def run_pointing_loop(
         ValueError: If drift and corrector mode counts differ, or a
             ``detector`` is given without a ``key``.
     """
+    require_float64(
+        "run_pointing_loop", system, input_field, drift_table, gain, regularization
+    )
     _branch_check(system, sense)
     _branch_check(system, science)
     drift_index = _trunk_stage_index(system, drift_stage, "drift")
     corrector_index = _trunk_stage_index(system, corrector_stage, "corrector")
-    drift_table = jnp.asarray(drift_table)
+    drift_table = as_float_leaf(drift_table)
     drift = system.trunk.stages[drift_index].op
     corrector = system.trunk.stages[corrector_index].op
     n_modes = corrector.command.size

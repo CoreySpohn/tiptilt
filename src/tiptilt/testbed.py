@@ -25,6 +25,7 @@ from dataclasses import field as dataclass_field
 import jax.numpy as jnp
 import numpy as np
 from hwoutils.constants import d2s, nm2m
+from hwoutils.precision import require_float64
 from optixstuff.grids import Frame, PixelGrid
 from physicaloptix import (
     BeamSplitter,
@@ -340,6 +341,7 @@ def run(scenario, algorithm):
     }
     if scenario.regime not in dispatch:
         raise ValueError(f"unknown regime {scenario.regime!r}")
+    require_float64("run", scenario.params["input_field"])
     return dispatch[scenario.regime](scenario, spec)
 
 
@@ -378,7 +380,10 @@ def _fourier_basis(npix, freqs, amp_nm=5.0):
 def _aperture(npix):
     grid = PixelGrid.pupil(npix)
     xg, yg = map(np.asarray, grid.coordinates())
-    return grid, xg, yg, (xg**2 + yg**2 <= 0.25).astype(float)
+    # In half-pixel units the pupil radius and all pixel centers are integers.
+    axis = 2 * np.arange(npix) - (npix - 1)
+    aperture = axis[:, None] ** 2 + axis[None, :] ** 2 <= npix**2
+    return grid, xg, yg, aperture
 
 
 def dig_from_cold(npix=16, n_steps=15, stroke_cap_nm=None, actuator_dm=False):
@@ -420,9 +425,7 @@ def dig_from_cold(npix=16, n_steps=15, stroke_cap_nm=None, actuator_dm=False):
         grid=grid,
         plane=PlaneKind.PUPIL,
     )
-    model_field = Field(
-        data=jnp.asarray(aperture).astype(complex), grid=grid, plane=PlaneKind.PUPIL
-    )
+    model_field = Field(data=aperture, grid=grid, plane=PlaneKind.PUPIL)
     fxg, fyg = map(np.asarray, focal.coordinates())
     mask = jnp.asarray((np.abs(fxg - 3.0) < 0.6) & (np.abs(fyg - 1.0) < 0.8))
     # Stroke minimization aims at a RELATIVE target: 5 percent of the actual
@@ -463,7 +466,7 @@ def one_dm_vs_two_dm(npix=16, n_steps=25):
     focal = PixelGrid.focal(32, 0.5, Frame(WL, DIAM_M, "circumscribed"))
     ripple = 1.0 + 0.15 * np.cos(2 * np.pi * 3 * xg)
     input_field = Field(
-        data=jnp.asarray(aperture * ripple).astype(complex),
+        data=aperture * ripple,
         grid=grid,
         plane=PlaneKind.PUPIL,
     )
@@ -539,9 +542,7 @@ def hold_against_drift(npix=16, n_steps=12):
             Stage("science", Fraunhofer(grid_in=grid, grid_out=focal)),
         )
     )
-    input_field = Field(
-        data=jnp.asarray(aperture).astype(complex), grid=grid, plane=PlaneKind.PUPIL
-    )
+    input_field = Field(data=aperture, grid=grid, plane=PlaneKind.PUPIL)
     fxg, fyg = map(np.asarray, focal.coordinates())
     mask = jnp.asarray(
         ((np.abs(fxg - 3.0) < 0.6) & (np.abs(fyg - 1.0) < 0.6))
@@ -611,9 +612,7 @@ def _forked_system(npix=16, sci_ncpa_nm=0.0):
         split=split,
         branches=(Branch("sci", "transmit", sci), Branch("wfs", "reflect", wfs)),
     )
-    input_field = Field(
-        data=jnp.asarray(aperture).astype(complex), grid=grid, plane=PlaneKind.PUPIL
-    )
+    input_field = Field(data=aperture, grid=grid, plane=PlaneKind.PUPIL)
     fxg, fyg = map(np.asarray, focal.coordinates())
     mask = jnp.asarray((np.abs(fxg - 3.0) < 0.6) & (np.abs(np.abs(fyg) - 0.5) < 0.7))
     return system, input_field, {"sci": mask, "wfs": mask}
@@ -760,9 +759,7 @@ def _pointing_system(npix=16, sensor_defocus_nm=25.0):
             Branch("lowfs", "reflect", sensor_arm),
         ),
     )
-    input_field = Field(
-        data=jnp.asarray(aperture).astype(complex), grid=grid, plane=PlaneKind.PUPIL
-    )
+    input_field = Field(data=aperture, grid=grid, plane=PlaneKind.PUPIL)
     fxg, fyg = map(np.asarray, focal.coordinates())
     radius = np.hypot(fxg, fyg)
     mask = jnp.asarray((radius > 1.5) & (radius < 4.0))
@@ -867,9 +864,7 @@ def hardware_dm(npix=16, n_steps=12, dac_step_nm=None, n_dead=0, stuck_nm=None):
         grid=grid,
         plane=PlaneKind.PUPIL,
     )
-    model_field = Field(
-        data=jnp.asarray(aperture).astype(complex), grid=grid, plane=PlaneKind.PUPIL
-    )
+    model_field = Field(data=aperture, grid=grid, plane=PlaneKind.PUPIL)
     fxg, fyg = map(np.asarray, focal.coordinates())
     mask = jnp.asarray((np.abs(fxg - 3.0) < 0.6) & (np.abs(fyg - 1.0) < 0.8))
     out, _ = path.propagate(input_field)

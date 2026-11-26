@@ -43,11 +43,69 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from astropy.io import fits
-from hwoutils.leaves import as_float_leaf
+from hwoutils.leaves import as_bulk_leaf, as_float_leaf, is_traced
+from hwoutils.numerics import COARSEST, is_uniform
+from hwoutils.precision import like
 from jax.typing import ArrayLike
 from jaxtyping import Array
 from optixstuff.grids import Frame, Image, Measure, PixelGrid
 from optixstuff.speckle import AbstractSpeckleField
+
+from ._table_clock import _TableClock
+
+
+def _checked_field_table(value, name):
+    """Convert a delivered field, checking host narrowing before staging it.
+
+    Args:
+        value: Nominal or sensitivity field samples.
+        name: Argument name for validation diagnostics.
+
+    Returns:
+        The checked bulk leaf.
+
+    Raises:
+        ValueError: If a component is nonfinite or fails checked narrowing.
+    """
+    message = f"{name} field components must be finite"
+    if any(is_traced(x) for x in jax.tree.leaves(value)):
+        storage = as_bulk_leaf(value)
+        return eqx.error_if(storage, ~jnp.all(jnp.isfinite(storage)), message)
+    with jax.ensure_compile_time_eval():
+        storage = as_bulk_leaf(value)
+        if not np.all(np.isfinite(np.asarray(storage))):
+            raise ValueError(message)
+        return storage
+
+
+def _complex_plane(real, imag, dtype):
+    """Pack selected FITS components into checked host complex storage.
+
+    Args:
+        real: Real field samples.
+        imag: Imaginary field samples.
+        dtype: Requested complex storage dtype.
+
+    Returns:
+        Complex field at the requested precision.
+
+    Raises:
+        ValueError: If the dtype is real or a component does not fit.
+    """
+    dtype = np.dtype(dtype)
+    if dtype.kind != "c":
+        raise ValueError("dtype must be complex")
+    field = np.empty(real.shape, dtype=dtype)
+    for before, after in ((real, field.real), (imag, field.imag)):
+        with np.errstate(over="ignore", under="ignore"):
+            after[...] = before
+        if not np.all(np.isfinite(after)):
+            raise ValueError(f"field components must fit finite {dtype} storage")
+        if before.dtype.itemsize > after.dtype.itemsize and np.any(
+            (before != 0) & (after == 0)
+        ):
+            raise ValueError(f"field components underflow to zero in {dtype} storage")
+    return field
 
 
 def load_hwo_sim(
@@ -86,20 +144,24 @@ def load_hwo_sim(
         (nx,) in lambda/D, ``wavelengths_nm``, and ``grid`` with its Frame.
 
     Raises:
-        ValueError: If ``wavelengths_nm`` does not have one entry per E0 plane.
+        ValueError: If the detector axis is nonuniform, the number of wavelengths
+            disagrees with E0, or a selected field component does not fit the
+            requested complex dtype.
     """
     data_dir = Path(data_dir)
     dark_zone = fits.getdata(data_dir / "dark_zone.fits").astype(bool)
     axis = np.asarray(
         fits.getdata(data_dir / "detector_axis.fits"), dtype=float
     ).ravel()
-    step = float(np.mean(np.diff(axis)))
     if (
         axis.size != dark_zone.shape[1]
-        or step <= 0
-        or not np.allclose(np.diff(axis), step, rtol=1e-10, atol=0.0)
+        or axis.size < 2
+        or not np.all(np.isfinite(axis))
+        or not np.all(axis[1:] > axis[:-1])
+        or not is_uniform(axis - axis[0])
     ):
         raise ValueError("detector_axis must be ascending and uniformly sampled")
+    step = float(np.mean(np.diff(axis)))
     # The format uses the same coordinate origin and spacing on both axes.
     grid = PixelGrid.regular(
         dark_zone.shape,
@@ -110,15 +172,18 @@ def load_hwo_sim(
     )
 
     e0_raw = fits.getdata(data_dir / "E0.fits")
-    e0 = (e0_raw[..., 0] + 1j * e0_raw[..., 1]).astype(dtype)
-
     wl_nm = np.asarray(wavelengths_nm, dtype=float)
-    if e0.shape[0] != wl_nm.size:
+    if e0_raw.shape[0] != wl_nm.size:
         raise ValueError(
-            f"E0 has {e0.shape[0]} wavelengths but wavelengths_nm has "
+            f"E0 has {e0_raw.shape[0]} wavelengths but wavelengths_nm has "
             f"{wl_nm.size}; pass the filter definition of the run that wrote "
             "these files."
         )
+    if wl_indices is not None:
+        keep = np.asarray(wl_indices, dtype=int)
+        e0_raw = e0_raw[keep]
+        wl_nm = wl_nm[keep]
+    e0 = _complex_plane(e0_raw[..., 0], e0_raw[..., 1], dtype)
 
     z_slice = slice(None) if num_zern is None else slice(0, num_zern)
     with fits.open(data_dir / "sensitivities.fits", memmap=True) as hdul:
@@ -127,13 +192,8 @@ def load_hwo_sim(
             block = np.asarray(raw[:, :, :, :, z_slice])
         else:
             block = np.stack([np.asarray(raw[i, :, :, :, z_slice]) for i in wl_indices])
-    g = (block[:, :, 0] + 1j * block[:, :, 1]).astype(dtype)
+    g = _complex_plane(block[:, :, 0], block[:, :, 1], dtype)
     del block
-
-    if wl_indices is not None:
-        keep = np.asarray(wl_indices, dtype=int)
-        e0 = e0[keep]
-        wl_nm = wl_nm[keep]
 
     return {
         "E0": e0,
@@ -177,7 +237,8 @@ def segment_zernike_series(
 
     Returns:
         Tuple ``(time_s, coefficients)``, shaped ``(T,)`` and
-        ``(T, num_seg, num_zern)``, sorted by time.
+        ``(T, num_seg, num_zern)``, sorted by time. The times remain on
+        the host in binary64 so the field can rebase them before storage.
 
     Raises:
         ValueError: If the lengths disagree, the mode count does not divide
@@ -204,7 +265,7 @@ def segment_zernike_series(
     if recenter:
         coeffs = coeffs - coeffs.mean(axis=0, keepdims=True)
     order = np.argsort(time_s)
-    return jnp.asarray(time_s[order]), jnp.asarray(coeffs[order])
+    return time_s[order], jnp.asarray(coeffs[order])
 
 
 def _optional_float_leaf(value):
@@ -220,7 +281,9 @@ class HwoSimSpeckleField(AbstractSpeckleField):
     ``contrast_to_flux_fraction``. There is no data outside the dark zone; the
     array holds 0.0 there and :meth:`data_mask` is False.
 
-    Wavelength handling is nearest-neighbor over the stored planes.
+    Wavelength handling is nearest-neighbor over the delivered planes, with
+    ties resolved in delivery order. Centers must be distinct on the
+    float32 wavelength grid.
     Interpolating a complex field across a broad band would wrap phase
     between samples, so it is not attempted; evaluate at or near the stored
     wavelengths.
@@ -230,8 +293,8 @@ class HwoSimSpeckleField(AbstractSpeckleField):
     float32, in which the sinusoid phase ``2 pi f t`` loses absolute precision
     as the elapsed time grows, so a clock origin left thousands of days away
     quietly corrupts the drift. The tabulated form has the same exposure
-    through its interpolation abscissa. :meth:`max_safe_elapsed_s` reports
-    the limit for whichever form is loaded.
+    through its interpolation offset from the first knot.
+    :meth:`max_safe_elapsed_s` estimates the working-precision limit.
 
     ``epoch_d`` is placement metadata, a static host binary64 float.
     :meth:`coefficients`, :meth:`realize` and :meth:`decompose_delta` take
@@ -239,19 +302,35 @@ class HwoSimSpeckleField(AbstractSpeckleField):
     ``epoch_d``. Convert scene time with ``elapsed_s(time_d)``, which refuses
     a float32 time at a nonzero epoch. In float32 the drift is exact only
     while ``elapsed_s`` stays under :meth:`max_safe_elapsed_s`.
+
+    Attributes:
+        grid: Native focal sampling and frame.
+        epoch_d: Scene days at zero elapsed seconds.
+        wavelengths_nm: Wavelength metadata in delivery order.
+        e_nom: Nominal field at each wavelength and dark-zone pixel.
+        gain: Sensitivities with flattened mode axes.
+        dark_zone_index: Flat row-major indices of delivered pixels.
+        grid_shape: Height and width of the full detector grid.
+        amplitude: Component amplitudes for sinusoid drift.
+        frequency_hz: Component frequencies for sinusoid drift.
+        phase: Component phases for sinusoid drift.
+        drift_coefficients: Per-knot coefficients for tabulated drift.
+        contrast_to_flux_fraction: Scale from peak contrast to per-pixel flux.
     """
 
     grid: PixelGrid
     epoch_d: float = eqx.field(static=True, converter=float)
     wavelengths_nm: Array
-    e_nom: Array  # complex (num_wl, num_pix): nominal field on the pixel list
-    gain: Array  # complex (num_wl, num_pix, num_mode): d(E)/d(mode), flat modes
+    _plane_order: tuple[int, ...] = eqx.field(static=True)
+    _wavelength_breaks: tuple[float, ...] = eqx.field(static=True)
+    e_nom: Array = eqx.field(converter=as_bulk_leaf)  # (num_wl, num_pix)
+    gain: Array = eqx.field(converter=as_bulk_leaf)  # (num_wl, num_pix, num_mode)
     dark_zone_index: Array  # int32 (num_pix,): flat grid index of each pixel
     grid_shape: tuple[int, int] = eqx.field(static=True)
     amplitude: Array | None
     frequency_hz: Array | None
     phase: Array | None
-    drift_time_s: Array | None
+    _clock: _TableClock | None
     drift_coefficients: Array | None
     contrast_to_flux_fraction: Array = eqx.field(converter=as_float_leaf)
 
@@ -283,7 +362,7 @@ class HwoSimSpeckleField(AbstractSpeckleField):
                 per nm; the trailing mode axes are flattened in C order.
             dark_zone: (ny, nx) mask whose True pixels, in C order, are the
                 pixel axis of ``e_nom`` and ``G``.
-            wavelengths_nm: Wavelength of each plane, (num_wl,).
+            wavelengths_nm: Concrete delivered wavelengths, (num_wl,).
             grid: Native sampling and Frame from replay provenance.
             epoch_d: Days from the scene epoch mapping to ``time_s = 0``. Default 0.0.
             contrast_to_flux_fraction: Scale from peak-referenced contrast to
@@ -296,6 +375,9 @@ class HwoSimSpeckleField(AbstractSpeckleField):
                 ``epoch_d``, strictly increasing.
             drift_coefficients: Tabulated drift, (T, num_seg, num_zern), nm
                 RMS wavefront error.
+
+        Raises:
+            ValueError: If the selected plane centers or fields are invalid.
         """
         dark_zone = np.asarray(dark_zone)
         num_wl, num_pix = np.shape(e_nom)
@@ -304,11 +386,36 @@ class HwoSimSpeckleField(AbstractSpeckleField):
         if grid.unit != "lod" or grid.shape != dark_zone.shape:
             raise ValueError("grid must be native lod and match dark_zone")
         self.epoch_d = epoch_d
-        self.wavelengths_nm = as_float_leaf(wavelengths_nm)
-        self.e_nom = jnp.asarray(e_nom)
+        if is_traced(wavelengths_nm):
+            raise ValueError("wavelengths_nm must be concrete plane centers")
+        centers = np.asarray(wavelengths_nm, dtype=np.float64)
+        if centers.shape != (num_wl,) or not num_wl:
+            raise ValueError("wavelengths_nm must match the nonempty plane axis")
+        if not np.all(np.isfinite(centers)) or np.any(centers <= 0.0):
+            raise ValueError("wavelengths_nm must be finite and positive")
+        order = np.argsort(centers)
+        sorted_centers = centers[order]
+        breaks = sorted_centers[:-1] + np.diff(sorted_centers) / 2
+        with np.errstate(over="ignore", under="ignore"):
+            grid_centers = sorted_centers.astype(COARSEST)
+        if (
+            not np.all(np.isfinite(grid_centers))
+            or np.any(grid_centers <= 0)
+            or np.any(grid_centers[1:] <= grid_centers[:-1])
+            or np.any(breaks <= sorted_centers[:-1])
+            or np.any(breaks >= sorted_centers[1:])
+        ):
+            raise ValueError(
+                "wavelengths_nm must have distinct centers on the float32 grid"
+            )
+        self._plane_order = tuple(map(int, order))
+        self._wavelength_breaks = tuple(map(float, breaks))
+        with jax.ensure_compile_time_eval():
+            self.wavelengths_nm = as_float_leaf(wavelengths_nm)
+        self.e_nom = _checked_field_table(e_nom, "e_nom")
         # Flat modes, so the drift contracts as a single matrix-vector product
         # per wavelength.
-        self.gain = jnp.asarray(G).reshape(num_wl, num_pix, -1)
+        self.gain = _checked_field_table(G, "gain").reshape(num_wl, num_pix, -1)
         self.dark_zone_index = jnp.asarray(
             np.flatnonzero(dark_zone.ravel()), dtype=jnp.int32
         )
@@ -316,8 +423,15 @@ class HwoSimSpeckleField(AbstractSpeckleField):
         self.amplitude = _optional_float_leaf(amplitude)
         self.frequency_hz = _optional_float_leaf(frequency_hz)
         self.phase = _optional_float_leaf(phase)
-        self.drift_time_s = _optional_float_leaf(drift_time_s)
         self.drift_coefficients = _optional_float_leaf(drift_coefficients)
+        clock_owner = (
+            self.drift_coefficients if self.amplitude is None else self.amplitude
+        )
+        self._clock = (
+            None
+            if drift_time_s is None or clock_owner is None
+            else _TableClock(drift_time_s, clock_owner)
+        )
         self.contrast_to_flux_fraction = contrast_to_flux_fraction
 
     def __check_init__(self):
@@ -328,11 +442,6 @@ class HwoSimSpeckleField(AbstractSpeckleField):
             raise ValueError(
                 f"dark_zone has {self.dark_zone_index.shape[0]} pixels but e_nom "
                 f"has {self.e_nom.shape[1]}"
-            )
-        if self.wavelengths_nm.shape != (self.e_nom.shape[0],):
-            raise ValueError(
-                f"wavelengths_nm has shape {self.wavelengths_nm.shape} but e_nom "
-                f"has {self.e_nom.shape[0]} planes"
             )
         sinusoid = self.amplitude is not None
         tabulated = self.drift_coefficients is not None
@@ -353,11 +462,11 @@ class HwoSimSpeckleField(AbstractSpeckleField):
                 )
             modes = self.amplitude.shape[0] * self.amplitude.shape[1]
         else:
-            if self.drift_time_s is None:
+            if self._clock is None:
                 raise ValueError(
                     "a tabulated drift needs drift_time_s alongside drift_coefficients"
                 )
-            t_tab, c_tab = self.drift_time_s, self.drift_coefficients
+            t_tab, c_tab = self._clock.offsets_s, self.drift_coefficients
             if t_tab.ndim != 1 or c_tab.ndim != 3:
                 raise ValueError(
                     "drift_time_s must be (T,) and drift_coefficients "
@@ -381,6 +490,15 @@ class HwoSimSpeckleField(AbstractSpeckleField):
         return int(self.gain.shape[-1])
 
     @property
+    def drift_time_s(self) -> Array | None:
+        """Return the drift knot times for inspection.
+
+        Returns:
+            Knot times in seconds at the storage precision, or None.
+        """
+        return None if self._clock is None else self._clock.times_s
+
+    @property
     def drift_is_tabulated(self) -> bool:
         """Whether the drift is a tabulated series rather than sinusoids."""
         return self.drift_coefficients is not None
@@ -399,28 +517,62 @@ class HwoSimSpeckleField(AbstractSpeckleField):
 
         The branch is on ``None``-ness, which is PyTree structure rather than
         a traced value, so it resolves at trace time under ``jit``.
+
+        Args:
+            elapsed_s: Seconds since the field's clock origin.
+
+        Returns:
+            Coefficients for each segment and Zernike mode.
         """
-        t = jnp.asarray(elapsed_s, dtype=float)
         if self.drift_coefficients is None:
+            t = like(elapsed_s, self.frequency_hz)
             wave = self.amplitude * jnp.cos(
                 2.0 * jnp.pi * self.frequency_hz * t + self.phase
             )
             return jnp.sum(wave, axis=-1)
+        t = self._clock.offset(elapsed_s)
         table = self.drift_coefficients
         flat = table.reshape(table.shape[0], -1)
         # jnp.interp clamps outside the abscissa: a series covers a finite
         # window and the wavefront outside it is unknown, so holding the
         # endpoint is honest where extrapolating a thermal ramp would not be.
-        interp = jax.vmap(lambda column: jnp.interp(t, self.drift_time_s, column))
+        interp = jax.vmap(lambda column: jnp.interp(t, self._clock.offsets_s, column))
         return interp(flat.T).reshape(table.shape[1], table.shape[2])
 
     def spectral_breaks_nm(self) -> np.ndarray:
-        """Nearest-plane selection changes midway between sorted wavelengths."""
-        planes = np.unique(np.asarray(self.wavelengths_nm, dtype=float))
-        return planes[:-1] + np.diff(planes) / 2
+        """Return the plane switches used by the nearest-neighbor lookup.
+
+        An exact midpoint selects the first plane in delivery order.
+
+        Returns:
+            Sorted midpoints in nanometers between delivered plane centers.
+        """
+        return np.asarray(self._wavelength_breaks, dtype=np.float64)
 
     def _wavelength_index(self, wavelength_nm: ArrayLike) -> Array:
-        return jnp.argmin(jnp.abs(self.wavelengths_nm - jnp.asarray(wavelength_nm)))
+        if np.shape(wavelength_nm) != ():
+            raise ValueError("wavelength_nm must be scalar")
+        breaks = self.spectral_breaks_nm()
+        order = np.asarray(self._plane_order, dtype=np.int32)
+        tie_right = order[1:] < order[:-1]
+        if not is_traced(wavelength_nm):
+            query = np.asarray(wavelength_nm, dtype=np.float64)
+            right = (query > breaks) | ((query == breaks) & tie_right)
+            return jnp.asarray(order[np.count_nonzero(right)])
+
+        # Compare conditioned differences on the common grid. Splitting each
+        # midpoint keeps float32 queries from inheriting a rounded boundary.
+        high = breaks.astype(COARSEST)
+        low = breaks - high
+        query = jnp.asarray(wavelength_nm)
+        if not jnp.issubdtype(query.dtype, jnp.floating):
+            query = query.astype(COARSEST)
+        delta = ((query - high) - jnp.asarray(low, dtype=query.dtype)).astype(COARSEST)
+        right = (delta > 0) | ((delta == 0) & tie_right)
+        return jnp.asarray(order)[jnp.count_nonzero(right)]
+
+    def _plane(self, table, index):
+        return like(jnp.take(table, index, axis=0), self.contrast_to_flux_fraction)
 
     def _scatter(self, values: Array) -> Array:
         flat = jnp.zeros(self.grid_shape[0] * self.grid_shape[1], dtype=values.dtype)
@@ -440,7 +592,7 @@ class HwoSimSpeckleField(AbstractSpeckleField):
     def static_contrast(self, wavelength_nm: ArrayLike) -> Array:
         """Static coronagraphic floor ``|E_nom|^2`` as peak-referenced contrast."""
         index = self._wavelength_index(wavelength_nm)
-        return self._scatter(jnp.abs(jnp.take(self.e_nom, index, axis=0)) ** 2)
+        return self._scatter(jnp.abs(self._plane(self.e_nom, index)) ** 2)
 
     def static_flux_fraction(self, wavelength_nm: ArrayLike) -> Array:
         """Static coronagraphic floor as flux fraction per pixel.
@@ -544,8 +696,11 @@ class HwoSimSpeckleField(AbstractSpeckleField):
         supplied = {
             name: as_float_leaf(value)
             for name, value in drift.items()
-            if value is not None
+            if value is not None and name != "drift_time_s"
         }
+        if drift.get("drift_time_s") is not None:
+            table = supplied.get("drift_coefficients", self.drift_coefficients)
+            supplied["_clock"] = _TableClock(drift["drift_time_s"], table)
         if supplied:
             names = tuple(supplied)
             new = eqx.tree_at(
@@ -574,12 +729,9 @@ class HwoSimSpeckleField(AbstractSpeckleField):
         for the tolerance gives the returned bound. Anchor ``epoch_d`` inside
         it, or enable ``jax_enable_x64``.
 
-        A tabulated drift has the same exposure through a different quantity.
-        There is no phase, but the interpolation abscissa is read at absolute
-        time, whose float32 quantization is also ``t * 2 ** -24``. Once that
-        reaches an appreciable fraction of the finest sample spacing the
-        interpolation starts landing on the wrong side of a sample, so the
-        bound becomes that spacing over the same relative resolution.
+        For a tabulated drift the bound applies to the offset from the first
+        knot. An elapsed time already rounded by the caller also carries
+        its original rounding error.
 
         Args:
             phase_tol_rad: Acceptable drift phase error, in radians. Sinusoid
@@ -588,11 +740,14 @@ class HwoSimSpeckleField(AbstractSpeckleField):
                 sample spacing. Tabulated drift only.
 
         Returns:
-            Bound on ``time_s`` in seconds.
+            Bound in seconds from the sinusoid epoch or the first table knot.
         """
         eps = float(np.finfo(np.float32).eps)
         if self.drift_is_tabulated:
-            spacing = float(jnp.min(jnp.diff(self.drift_time_s)))
+            offsets = self._clock.offsets_s
+            if offsets.size == 1:
+                return math.inf
+            spacing = float(jnp.min(jnp.diff(offsets)))
             return spacing_tol_frac * spacing / eps
         f_max = float(jnp.max(self.frequency_hz))
         return phase_tol_rad / (2.0 * np.pi * eps * f_max)
@@ -610,8 +765,8 @@ class HwoSimSpeckleField(AbstractSpeckleField):
         amplitude sits where the linear E-field model is meant to be used.
         """
         index = self._wavelength_index(wavelength_nm)
-        e_nom = jnp.take(self.e_nom, index, axis=0)
-        gain = jnp.take(self.gain, index, axis=0)
+        e_nom = self._plane(self.e_nom, index)
+        gain = self._plane(self.gain, index)
         delta_e = gain @ self.coefficients(elapsed_s=elapsed_s).ravel().astype(
             gain.dtype
         )
@@ -635,8 +790,8 @@ class HwoSimSpeckleField(AbstractSpeckleField):
         there and :meth:`data_mask` is False.
         """
         index = self._wavelength_index(wavelength_nm)
-        e_nom = jnp.take(self.e_nom, index, axis=0)
-        gain = jnp.take(self.gain, index, axis=0)
+        e_nom = self._plane(self.e_nom, index)
+        gain = self._plane(self.gain, index)
         delta_e = gain @ self.coefficients(elapsed_s=elapsed_s).ravel().astype(
             gain.dtype
         )

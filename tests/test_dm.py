@@ -4,6 +4,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 from hwoutils.constants import two_pi
+from hwoutils.numerics import roundoff
 from optixstuff.grids import Frame, PixelGrid
 from physicaloptix import (
     BeamSplitter,
@@ -53,7 +54,9 @@ class TestInfluenceBasis:
         """The influence function is coupling**((r/pitch)**2): check the
         sampled mode against the analytic form at the pixel nearest a
         neighboring actuator (the pixel sits ~half a pixel off the exact
-        center, so compare at the PROBED position, not at r == pitch)."""
+        center, so compare at the probed position). The dyadic distances
+        are exact. Allow log, product, exp and the final storage rounding.
+        """
         grid = PixelGrid.pupil(64)
         coupling = 0.12
         basis, centers = dm_influence_basis(grid, n_actuators=8, coupling=coupling)
@@ -68,7 +71,7 @@ class TestInfluenceBasis:
         r2 = float(np.sum((probe - centers[k]) ** 2))
         expected = coupling ** (r2 / pitch**2)
         value = float(np.asarray(basis.B[k])[iy, ix])
-        assert value == pytest.approx(expected, rel=1e-9)
+        assert abs(value - expected) <= roundoff(expected, n_ops=4, dtype=basis.B.dtype)
         # And the analytic value AT the neighbor is the coupling by design.
         assert coupling ** (pitch**2 / pitch**2) == pytest.approx(coupling)
 
@@ -166,7 +169,11 @@ class TestActuatorLattice:
     def test_matches_the_explicit_gaussian_sum(self):
         """The FFT-evaluated surface IS the sum of Gaussian influence
         functions: compare against the explicit per-actuator sum for a
-        lattice well inside the array (no periodic wrap)."""
+        periodic pupil, using the nearest periodic copy of each actuator.
+        Other copies are at least half a diameter away (below 1e-30 nm here).
+        Two length-n complex contractions and two radix-2 FFTs cost at most
+        eight real roundings per term or stage, on the unsigned surface norm.
+        """
         grid = PixelGrid.pupil(64)
         n, pitch, coupling = 6, 0.08, 0.15
         lattice = ActuatorLattice.build(
@@ -176,12 +183,18 @@ class TestActuatorLattice:
         surface = np.asarray(lattice.surface(command))
         xg, yg = map(np.asarray, grid.coordinates())
         centers = np.asarray(lattice.centers)
-        explicit = sum(
-            float(command[a])
-            * np.exp(np.log(coupling) * ((xg - cx) ** 2 + (yg - cy) ** 2) / pitch**2)
-            for a, (cx, cy) in enumerate(centers)
+        terms = []
+        for weight, (cx, cy) in zip(np.asarray(command), centers, strict=True):
+            dx = xg.astype(np.float64) - cx
+            dy = yg.astype(np.float64) - cy
+            r2 = (dx - np.rint(dx)) ** 2 + (dy - np.rint(dy)) ** 2
+            terms.append(weight * np.exp(np.log(coupling) * r2 / pitch**2))
+        explicit = np.sum(terms, axis=0)
+        scale = np.linalg.norm(np.sum(np.abs(terms), axis=0))
+        n_ops = 8 * (2 * n + 2 * int(np.log2(surface.shape[0])) + 1)
+        assert np.linalg.norm(surface - explicit) <= roundoff(
+            scale, n_ops=n_ops, dtype=surface.dtype
         )
-        assert np.linalg.norm(surface - explicit) < 1e-9 * np.linalg.norm(explicit)
         assert lattice.n_modes == n * n
 
     def test_axis_order_is_row_major_y_x(self):

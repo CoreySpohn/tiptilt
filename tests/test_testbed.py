@@ -8,6 +8,7 @@ from hwoutils.precision import complex_of
 
 from tiptilt.testbed import (
     ALGORITHMS,
+    Scenario,
     compute_metrics,
     dig_from_cold,
     dual_science_common_mode,
@@ -123,7 +124,7 @@ class TestSweep:
 
     def test_unknown_algorithm_raises(self):
         with pytest.raises(KeyError, match="algorithm"):
-            run(dig_from_cold(), "does-not-exist")
+            run(Scenario("dig"), "does-not-exist")
         assert "oracle-efc" in ALGORITHMS
 
 

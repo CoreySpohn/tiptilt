@@ -13,7 +13,8 @@ real system cannot take.
 import equinox as eqx
 import jax
 import jax.numpy as jnp
-from hwoutils.leaves import as_leaf
+from hwoutils.leaves import as_complex_leaf, as_float_leaf, as_leaf
+from hwoutils.precision import require_float64
 from jaxtyping import Array
 from physicaloptix import Field, ModeBasis, PlaneKind
 
@@ -43,6 +44,7 @@ def probe_set(basis, *, amplitude_nm, n_probes=3, seed=0):
     Returns:
         A list of ``n_probes`` command vectors (each shape ``(n_modes,)``).
     """
+    require_float64("probe_set", basis, amplitude_nm)
     if not isinstance(basis, ModeBasis) or basis.n_modes == 0:
         raise ValueError(
             "probe_set needs a dense mode stack; this basis stores none "
@@ -104,6 +106,7 @@ def probe_measurement(
         both flattened over ``dark_zone_mask`` to ``(n_dark,)``, or ``(nlam,
         n_dark)`` for a chromatic field (one row per wavelength / sub-band).
     """
+    require_float64("probe_measurement", path, input_field, model_field, probe)
     command = path.stages[dm_index].op.command
     e_plus = _focal_field(path, input_field, dm_index, command + probe)
     e_minus = _focal_field(path, input_field, dm_index, command - probe)
@@ -165,8 +168,17 @@ def estimate_field_pairwise(
         sub-band estimate per wavelength (the per-pixel solve treats each
         wavelength/pixel as its own unknown).
     """
+    require_float64(
+        "estimate_field_pairwise",
+        path,
+        input_field,
+        model_field,
+        command,
+        probes,
+        regularization,
+    )
     if command is not None:
-        path = _with_command(path, dm_index, command)  # probe around this command
+        path = _with_command(path, dm_index, as_float_leaf(command))
     if model_field is None:
         model_field = input_field
     keys = (
@@ -223,6 +235,9 @@ def pairwise_estimate(probe_fields, diff_images, *, regularization=0.0):
     Returns:
         Complex field estimate, shape ``(n_pixels,)``.
     """
+    require_float64("pairwise_estimate", probe_fields, diff_images, regularization)
+    probe_fields = as_complex_leaf(probe_fields)
+    diff_images = as_float_leaf(diff_images)
     # H per pixel: (n_pixels, n_probes, 2), stacking the real and imag rows.
     h_rows = 4.0 * jnp.stack([jnp.real(probe_fields), jnp.imag(probe_fields)], axis=-1)
     h = jnp.moveaxis(h_rows, 1, 0)  # (n_pixels, n_probes, 2)
@@ -254,14 +269,20 @@ class KalmanFieldEstimator(eqx.Module):
         measurement_noise: Scalar measurement-noise variance (detector).
     """
 
-    state: jax.Array
-    covariance: jax.Array
+    state: jax.Array = eqx.field(converter=as_float_leaf)
+    covariance: jax.Array = eqx.field(converter=as_float_leaf)
     process_noise: float = eqx.field(static=True)
     measurement_noise: float = eqx.field(static=True)
 
     @classmethod
     def init(cls, n_pixels, *, initial_variance, process_noise, measurement_noise):
         """A diffuse prior: zero field, ``initial_variance`` on each quadrature."""
+        require_float64(
+            "KalmanFieldEstimator.init",
+            initial_variance,
+            process_noise,
+            measurement_noise,
+        )
         return cls(
             state=jnp.zeros((n_pixels, 2)),
             covariance=jnp.tile(initial_variance * jnp.eye(2), (n_pixels, 1, 1)),
@@ -288,6 +309,10 @@ class KalmanFieldEstimator(eqx.Module):
         Returns:
             A new ``KalmanFieldEstimator`` with the updated state and covariance.
         """
+        require_float64(
+            "KalmanFieldEstimator.update", self, probe_field, diff_image, field_change
+        )
+        probe_field = as_complex_leaf(probe_field)
         n_pixels = self.state.shape[0]
         if field_change is None:
             shift = jnp.zeros((n_pixels, 2))
@@ -329,6 +354,7 @@ def zwfs_calibrate(sensor, aperture_field, mode_basis, *, wavelength_nm):
         ``(reference_image, interaction)``: the flat-wavefront sensor image and
         the ``(n_pixels, n_modes)`` intensity response matrix.
     """
+    require_float64("zwfs_calibrate", sensor, aperture_field, mode_basis, wavelength_nm)
     modes = mode_basis.B
     n_modes = modes.shape[0]
     aperture = aperture_field.data
@@ -365,7 +391,9 @@ def zwfs_reconstruct(image, reference, interaction, *, regularization=0.0):
     Returns:
         The reconstructed mode coefficients, shape ``(n_modes,)``.
     """
-    diff = (image - reference).reshape(-1)
+    require_float64("zwfs_reconstruct", image, reference, interaction, regularization)
+    interaction = as_float_leaf(interaction)
+    diff = (as_float_leaf(image) - as_float_leaf(reference)).reshape(-1)
     n_modes = interaction.shape[1]
     gram = interaction.T @ interaction + regularization * jnp.eye(n_modes)
     return jnp.linalg.solve(gram, interaction.T @ diff)
@@ -402,6 +430,7 @@ class OracleEstimator(AbstractEstimator):
 
     def estimate(self, model, command, *, key=None):
         """Propagate the true field and read the dark zone."""
+        require_float64("OracleEstimator.estimate", self, model, command)
         data = model.focal_of(command, self.input_field)
         return self, model.dark_zone_unweighted(data)
 
@@ -433,6 +462,7 @@ class PairwiseEstimator(AbstractEstimator):
 
     def estimate(self, model, command, *, key=None):
         """A batch pairwise estimate at the current command."""
+        require_float64("PairwiseEstimator.estimate", self, model, command)
         e_hat = estimate_field_pairwise(
             model.set_commands(command),
             self.input_field,
@@ -510,6 +540,16 @@ class KalmanEstimator(AbstractEstimator):
         Returns:
             A ``KalmanEstimator``.
         """
+        require_float64(
+            "KalmanEstimator.build",
+            model,
+            input_field,
+            model_field,
+            probes,
+            initial_variance,
+            process_noise,
+            measurement_noise,
+        )
         return cls(
             filter=KalmanFieldEstimator.init(
                 model.stack_weights.shape[0],
@@ -528,6 +568,7 @@ class KalmanEstimator(AbstractEstimator):
 
     def estimate(self, model, command, *, key=None):
         """Predict through the command delta, update from one probe pair."""
+        require_float64("KalmanEstimator.estimate", self, model, command)
         # The filter state is the UNWEIGHTED per-(wavelength, pixel) field, so
         # predict with the unweighted field change; the sqrt-weighting enters
         # only in the controller's residual.
