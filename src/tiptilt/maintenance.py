@@ -25,6 +25,8 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 from hwoutils.constants import s2d
+from hwoutils.leaves import as_float_leaf
+from hwoutils.precision import require_float64
 from optixstuff import FocalResponse, FramePlan, Rates
 from optixstuff.spectral import Quadrature
 from physicaloptix import PhaseScreen
@@ -165,6 +167,17 @@ def maintain_dark_hole(
         TypeError: If ``drift_stage`` is not a ``PhaseScreen``.
         ValueError: For the same conditions as ``close_dark_hole``.
     """
+    require_float64(
+        "maintain_dark_hole",
+        path,
+        input_field,
+        model_field,
+        probes,
+        command0,
+        controller,
+        gain,
+        regularization,
+    )
     if not isinstance(path.stages[drift_stage].op, PhaseScreen):
         raise TypeError(
             f"drift_stage {drift_stage} is not a PhaseScreen; got "
@@ -195,6 +208,8 @@ def maintain_dark_hole(
     )
     if command0 is None:
         command0 = jnp.zeros(dz_model.n_total)
+    else:
+        command0 = as_float_leaf(command0)
     if controller is None:
         controller = EFCController.build(
             dz_model, gain=gain, regularization=regularization
@@ -232,7 +247,7 @@ def maintain_dark_hole(
         return eqx.tree_at(
             lambda model: model.path.stages[drift_stage].op,
             model_view,
-            optic.with_command(jnp.asarray(eps_of(time_d))),
+            optic.with_command(as_float_leaf(eps_of(time_d))),
         )
 
     command = command0

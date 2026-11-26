@@ -28,7 +28,10 @@ engine (`physicaloptix`) deliberately leaves out:
 2. **Wavefront control.** Wavefront-sensor estimators, a reconstructor over the
    same `(E_nom, G)` product (electric-field conjugation in space, a modal loop
    on the ground), and a differentiable control loop that commands the
-   deformable mirror.
+   deformable mirror. Sensing, controller design and closed-loop execution
+   require float64. Enable JAX x64 before building the optical model. Passing
+   a float32 control model raises `hwoutils.precision.PrecisionError` with
+   instructions for converting it.
 
 Space wavefront control is the priority; atmospheric turbulence shares the loop,
 the mode basis, and the residual interface.
@@ -42,7 +45,10 @@ the mode basis, and the residual interface.
   (autocorrelation `exp(-lag/tau)` at every lag and every step size, which the
   spectral synthesis only approximates over a few decorrelation times), plus
   the non-stationary regimes it cannot express at all -- a random walk whose
-  variance grows in time, and one-sided creep with a skewed marginal.
+  variance grows in time, and one-sided creep with a skewed marginal. For
+  spectral synthesis, grids with distinct lines that collapse in float32
+  require float64. Pass concrete host times to replay fields when absolute
+  elapsed seconds would lose the sample spacing in float32.
 - **hwo_sim reader** (`hwo_sim`): `load_hwo_sim` reads an hwo_sim linear
   E-field directory (nominal field and sensitivity matrix on the dark-zone
   pixel list), and `HwoSimSpeckleField` evaluates it as a speckle field with a

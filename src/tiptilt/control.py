@@ -1,5 +1,7 @@
 """Deformable-mirror wavefront control: models, controllers, and the EFC loop.
 
+Wavefront control and its design calculations require float64.
+
 The control problem factors onto two symmetric seams sharing one currency:
 
 - ``DarkZoneModel``: the controller-facing linearization of a path -- the
@@ -22,7 +24,8 @@ through the feedback.
 import equinox as eqx
 import jax
 import jax.numpy as jnp
-from hwoutils.leaves import as_float_leaf
+from hwoutils.leaves import as_complex_leaf, as_float_leaf
+from hwoutils.precision import like, require_float64
 from jaxtyping import Array
 from physicaloptix import PhaseScreen
 
@@ -65,12 +68,12 @@ class DarkZoneModel(eqx.Module):
     indices: tuple = eqx.field(static=True)
     split_points: tuple = eqx.field(static=True)
     mask: Array
-    weights: Array
-    sqrt_weights: Array
-    pixel_weights: Array
-    stack_weights: Array
-    g_dz: Array
-    operating_point: Array
+    weights: Array = eqx.field(converter=as_float_leaf)
+    sqrt_weights: Array = eqx.field(converter=as_float_leaf)
+    pixel_weights: Array = eqx.field(converter=as_float_leaf)
+    stack_weights: Array = eqx.field(converter=as_float_leaf)
+    g_dz: Array = eqx.field(converter=as_complex_leaf)
+    operating_point: Array = eqx.field(converter=as_float_leaf)
 
     @property
     def n_total(self):
@@ -107,6 +110,8 @@ class DarkZoneModel(eqx.Module):
             weighted: Field already multiplied by ``stack_weights``, either
                 complex or stacked as its real parts followed by its imaginary parts.
         """
+        require_float64("DarkZoneModel.weighted_contrast", self, weighted)
+        weighted = like(weighted, self.pixel_weights)
         return jnp.sum(jnp.abs(weighted) ** 2) / jnp.sum(self.pixel_weights)
 
     def contrast(self, data):
@@ -159,6 +164,9 @@ class DarkZoneModel(eqx.Module):
             ValueError: If ``dark_zone_mask`` selects no pixels, or
                 ``pixel_weights`` has the wrong shape or a negative entry.
         """
+        require_float64(
+            "DarkZoneModel.build", path, jacobian_field, operating_point, pixel_weights
+        )
         indices = (dm_indices,) if isinstance(dm_indices, int) else tuple(dm_indices)
         for i in indices:
             stage_op = path.stages[i].op
@@ -188,7 +196,7 @@ class DarkZoneModel(eqx.Module):
         if pixel_weights is None:
             pixel_w = jnp.ones(n_dark)
         else:
-            pixel_w = jnp.asarray(pixel_weights, dtype=float)
+            pixel_w = as_float_leaf(pixel_weights)
             if pixel_w.shape != (n_dark,):
                 raise ValueError(
                     f"pixel_weights has shape {pixel_w.shape}; expected "
@@ -202,6 +210,8 @@ class DarkZoneModel(eqx.Module):
         stack_weights = (sqrt_weights[:, jnp.newaxis] * sqrt_pixel_w).reshape(-1)
         if operating_point is None:
             operating_point = jnp.zeros(n_total)
+        else:
+            operating_point = as_float_leaf(operating_point)
 
         # A weighted view for the Jacobian only; the model's public
         # dark-zone vector stays unweighted (the estimators' convention).
@@ -240,6 +250,7 @@ class DarkZoneModel(eqx.Module):
 
     def weighted_dark_zone(self, data):
         """The sqrt-weighted dark-zone vector for a slice or spectral stack."""
+        require_float64("DarkZoneModel.weighted_dark_zone", self, data)
         if data.ndim == 2:
             return jnp.sqrt(self.pixel_weights) * data[self.mask]
         return self.stack_weights * self.dark_zone_unweighted(data)
@@ -281,8 +292,8 @@ class EFCController(AbstractController):
         gain: Loop gain (a differentiable leaf).
     """
 
-    control_matrix: Array
-    stack_weights: Array
+    control_matrix: Array = eqx.field(converter=as_float_leaf)
+    stack_weights: Array = eqx.field(converter=as_float_leaf)
     gain: Array = eqx.field(converter=as_float_leaf)
 
     @classmethod
@@ -297,6 +308,7 @@ class EFCController(AbstractController):
         Returns:
             An ``EFCController``.
         """
+        require_float64("EFCController.build", model, gain, regularization)
         if regularization <= 0.0:
             raise ValueError(f"regularization must be positive, got {regularization}")
         _require_jacobian(model, "EFCController")
@@ -310,6 +322,7 @@ class EFCController(AbstractController):
 
     def command_delta(self, estimate):
         """Weight the estimate, stack Re/Im, and apply the control matrix."""
+        require_float64("EFCController.command_delta", self, estimate)
         weighted = self.stack_weights * estimate.reshape(-1)
         residual = jnp.concatenate([jnp.real(weighted), jnp.imag(weighted)])
         return self, -self.gain * (self.control_matrix @ residual)
@@ -334,10 +347,10 @@ class StrokeMinController(AbstractController):
         gain: Step gain on the chosen delta.
     """
 
-    response: Array
-    rtr: Array
+    response: Array = eqx.field(converter=as_float_leaf)
+    rtr: Array = eqx.field(converter=as_float_leaf)
     model: DarkZoneModel
-    mu_grid: Array
+    mu_grid: Array = eqx.field(converter=as_float_leaf)
     target_contrast: Array = eqx.field(converter=as_float_leaf)
     gain: Array = eqx.field(converter=as_float_leaf)
 
@@ -356,6 +369,9 @@ class StrokeMinController(AbstractController):
         Returns:
             A ``StrokeMinController``.
         """
+        require_float64(
+            "StrokeMinController.build", model, target_contrast, mu_grid, gain
+        )
         if mu_grid is None:
             mu_grid = jnp.logspace(-12, 0, 13)
         _require_jacobian(model, "StrokeMinController")
@@ -364,7 +380,7 @@ class StrokeMinController(AbstractController):
             response=response,
             rtr=response.T @ response,
             model=model,
-            mu_grid=jnp.asarray(mu_grid),
+            mu_grid=mu_grid,
             target_contrast=target_contrast,
             gain=gain,
         )
@@ -375,12 +391,14 @@ class StrokeMinController(AbstractController):
         Args:
             estimate: Complex dark-zone field, flat or shaped ``(nlam, n_dark)``.
         """
+        require_float64("StrokeMinController.contrast", self, estimate)
         return self.model.weighted_contrast(
             self.model.stack_weights * estimate.reshape(-1)
         )
 
     def command_delta(self, estimate):
         """Pick the least-stroke multiplier that meets the target contrast."""
+        require_float64("StrokeMinController.command_delta", self, estimate)
         weighted = self.model.stack_weights * estimate.reshape(-1)
         residual = jnp.concatenate([jnp.real(weighted), jnp.imag(weighted)])
         rhs = self.response.T @ residual
@@ -440,7 +458,7 @@ class MatrixFreeEFCController(AbstractController):
 
     model: DarkZoneModel
     field: eqx.Module
-    command: Array
+    command: Array = eqx.field(converter=as_float_leaf)
     gain: Array = eqx.field(converter=as_float_leaf)
     regularization: float = eqx.field(static=True)
     max_iterations: int = eqx.field(static=True)
@@ -473,6 +491,15 @@ class MatrixFreeEFCController(AbstractController):
         Returns:
             A ``MatrixFreeEFCController``.
         """
+        require_float64(
+            "MatrixFreeEFCController.build",
+            model,
+            jacobian_field,
+            operating_point,
+            gain,
+            regularization,
+            tol,
+        )
         if regularization <= 0.0:
             raise ValueError(f"regularization must be positive, got {regularization}")
         if max_iterations < 1:
@@ -481,7 +508,7 @@ class MatrixFreeEFCController(AbstractController):
         return cls(
             model=model,
             field=jacobian_field,
-            command=jnp.asarray(command),
+            command=command,
             gain=gain,
             regularization=float(regularization),
             max_iterations=int(max_iterations),
@@ -490,7 +517,8 @@ class MatrixFreeEFCController(AbstractController):
 
     def relinearize(self, command):
         """The same law linearized at ``command``."""
-        return eqx.tree_at(lambda c: c.command, self, jnp.asarray(command))
+        require_float64("MatrixFreeEFCController.relinearize", self, command)
+        return eqx.tree_at(lambda c: c.command, self, as_float_leaf(command))
 
     def _stacked(self, command):
         data = self.model.focal_of(command, self.field)
@@ -499,6 +527,7 @@ class MatrixFreeEFCController(AbstractController):
 
     def command_delta(self, estimate):
         """Solve the regularized normal equations by CG on jvp/vjp products."""
+        require_float64("MatrixFreeEFCController.command_delta", self, estimate)
         _, jvp_fn = jax.linearize(self._stacked, self.command)
         vjp_fn = jax.linear_transpose(jvp_fn, self.command)
 
@@ -530,7 +559,7 @@ class PredictiveController(AbstractController):
     """
 
     efc: EFCController
-    prev_estimate: Array
+    prev_estimate: Array = eqx.field(converter=as_complex_leaf)
     alpha: Array = eqx.field(converter=as_float_leaf)
     primed: Array
 
@@ -547,17 +576,21 @@ class PredictiveController(AbstractController):
         Returns:
             A ``PredictiveController``.
         """
+        require_float64(
+            "PredictiveController.build", model, gain, regularization, alpha
+        )
         n_stack = model.stack_weights.shape[0]
         return cls(
             efc=EFCController.build(model, gain=gain, regularization=regularization),
-            prev_estimate=jnp.zeros(n_stack, dtype=complex),
+            prev_estimate=jnp.zeros(n_stack, dtype=jnp.result_type(model.g_dz, 1j)),
             alpha=alpha,
             primed=jnp.asarray(False),
         )
 
     def command_delta(self, estimate):
         """Extrapolate the estimate, apply EFC, and advance the state."""
-        flat = estimate.reshape(-1)
+        require_float64("PredictiveController.command_delta", self, estimate)
+        flat = as_complex_leaf(estimate).reshape(-1)
         predicted = jnp.where(
             self.primed, flat + self.alpha * (flat - self.prev_estimate), flat
         )
@@ -684,6 +717,16 @@ def close_dark_hole(
             is missing ``probes``, or the Kalman estimator is combined with
             ``jacobian="matrix-free"``.
     """
+    require_float64(
+        "close_dark_hole",
+        path,
+        input_field,
+        model_field,
+        probes,
+        gain,
+        regularization,
+        pixel_weights,
+    )
     indices = (dm_indices,) if isinstance(dm_indices, int) else tuple(dm_indices)
     if estimator not in ("oracle", "pairwise", "kalman"):
         raise ValueError(

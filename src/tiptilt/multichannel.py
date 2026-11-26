@@ -27,7 +27,8 @@ The machinery is three pieces on the existing seams:
 import equinox as eqx
 import jax.numpy as jnp
 import numpy as np
-from hwoutils.leaves import as_float_leaf
+from hwoutils.leaves import as_complex_leaf, as_float_leaf
+from hwoutils.precision import require_float64
 from jaxtyping import Array
 from physicaloptix import PhaseScreen, linearize_shared
 
@@ -41,6 +42,10 @@ def _stage_index(path, name, context):
     return names.index(name)
 
 
+def _channel_fields(blocks):
+    return tuple(as_complex_leaf(block) for block in blocks)
+
+
 class MultiChannelModel(eqx.Module):
     """Masked dark-zone views of the per-channel shared-mode blocks.
 
@@ -52,8 +57,8 @@ class MultiChannelModel(eqx.Module):
     """
 
     names: tuple = eqx.field(static=True)
-    g_blocks: tuple
-    e_refs: tuple
+    g_blocks: tuple = eqx.field(converter=_channel_fields)
+    e_refs: tuple = eqx.field(converter=_channel_fields)
     masks: tuple
 
     @classmethod
@@ -67,6 +72,7 @@ class MultiChannelModel(eqx.Module):
         Returns:
             A ``MultiChannelModel``.
         """
+        require_float64("MultiChannelModel.build", mcl)
         missing = [name for name in mcl.names if name not in masks]
         if missing:
             raise ValueError(f"masks missing for channel(s) {missing}")
@@ -121,6 +127,7 @@ def shared_dm_command(model, sense, e_hat, *, regularization, gain=1.0):
     Returns:
         ``(command, eps_hat)``: the shared-DM command and the raw estimate.
     """
+    require_float64("shared_dm_command", model, e_hat, gain, regularization)
     g = model.g_block(sense)
     h = jnp.concatenate([jnp.real(g), jnp.imag(g)], axis=0)  # (2n, m)
     z = jnp.concatenate([jnp.real(e_hat), jnp.imag(e_hat)])
@@ -144,7 +151,7 @@ class FeedForwardController(AbstractController):
         gain: Fraction of the correction applied per step.
     """
 
-    solve_matrix: Array
+    solve_matrix: Array = eqx.field(converter=as_float_leaf)
     gain: Array = eqx.field(converter=as_float_leaf)
 
     @classmethod
@@ -167,6 +174,9 @@ class FeedForwardController(AbstractController):
             ValueError: If the weights are not a vector of one finite,
                 nonnegative weight per sensing arm with positive total weight.
         """
+        require_float64(
+            "FeedForwardController.build", model, gain, regularization, weights
+        )
         sense = tuple(sense)
         weights = np.ones(len(sense)) if weights is None else np.asarray(weights)
         if weights.shape != (len(sense),):
@@ -191,6 +201,7 @@ class FeedForwardController(AbstractController):
 
     def command_delta(self, estimate):
         """The negated weighted-least-squares shared-mode estimate."""
+        require_float64("FeedForwardController.command_delta", self, estimate)
         flat = estimate.reshape(-1)
         z = jnp.concatenate([jnp.real(flat), jnp.imag(flat)])
         eps_hat = self.solve_matrix @ z
@@ -252,6 +263,16 @@ def run_multichannel(
         dark-zone contrast per channel), and ``excess`` (contrast of the
         reference-subtracted field per channel -- the drift-tracking axis).
     """
+    require_float64(
+        "run_multichannel",
+        system,
+        input_field,
+        drift_table,
+        local_drift,
+        gain,
+        regularization,
+        weights,
+    )
     del science  # all channels are reported; kept for call-site clarity
     trunk_drift = _stage_index(system.trunk, drift_stage, "drift")
     trunk_dm = _stage_index(system.trunk, shared_dm_stage, "shared corrector")
@@ -282,10 +303,11 @@ def run_multichannel(
             stage_idx = _stage_index(
                 system.branches[branch_idx].path, stage_name, f"{name} local"
             )
-            local[name] = (branch_idx, stage_idx, jnp.asarray(table))
+            local[name] = (branch_idx, stage_idx, as_float_leaf(table))
 
     drift = system.trunk.stages[trunk_drift].op
     mirror = system.trunk.stages[trunk_dm].op
+    drift_table = as_float_leaf(drift_table)
 
     def with_state(command, frame):
         updated = eqx.tree_at(
@@ -295,7 +317,7 @@ def run_multichannel(
             ),
             system,
             (
-                drift.with_command(jnp.asarray(drift_table[frame])),
+                drift.with_command(drift_table[frame]),
                 mirror.with_command(command),
             ),
         )

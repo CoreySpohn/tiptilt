@@ -47,11 +47,15 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 import numpy as np
-from hwoutils.leaves import as_float_leaf
+from hwoutils.leaves import as_float_leaf, is_traced
+from hwoutils.numerics import COARSEST, eps
+from hwoutils.precision import like, require_float64
 from jaxtyping import Array
 from optixstuff import FocalResponse, LinearSpeckleField
 from optixstuff.spectral import trapezoid_weights
 from physicaloptix import AnalyticSpeckleField
+
+from ._table_clock import _TableClock
 
 # Below this effective frequency count a single frozen realization's modal
 # covariance is an unreliable sample of the target (scatter ~ 1/sqrt(N_eff)).
@@ -86,11 +90,62 @@ def _line_powers(frequencies_hz, psd):
         )
     # A singleton is a discrete line power, not a finite-span PSD integral.
     if f.size > 1:
-        df = np.asarray(trapezoid_weights(f))
+        # The static quadrature determines both the draw weights and N_eff.
+        with (
+            jax.ensure_compile_time_eval(),
+            jax.enable_x64(),  # precision-ok: concrete host frequency quadrature
+        ):
+            df = np.asarray(trapezoid_weights(f))
         power = power * df
     if float(power.sum()) <= 0.0:
         raise ValueError("psd must have positive total power")
     return power
+
+
+def _stored_frequencies(frequencies_hz):
+    """Build a checked frequency leaf that resolves each delivered line.
+
+    Distinct lines that collapse in float32 require float64 storage.
+
+    Args:
+        frequencies_hz: Concrete frequency grid in Hz.
+
+    Returns:
+        The frequency leaf at the synthesis precision.
+    """
+    with jax.ensure_compile_time_eval():
+        stored = as_float_leaf(frequencies_hz)
+        host = np.asarray(frequencies_hz)
+        grid = np.asarray(stored)
+        if np.any(
+            (host[..., 1:] != host[..., :-1]) & (grid[..., 1:] == grid[..., :-1])
+        ):
+            require_float64("distinct frequency lines in spectral synthesis", stored)
+        return stored
+
+
+def _scale_covariance(matrix):
+    """Rescale a covariance by an even power of two for its eigensolver.
+
+    Args:
+        matrix: Finite real square matrix.
+
+    Returns:
+        The scaled matrix and the exponent for restoring its square root.
+    """
+    info = jnp.finfo(matrix.dtype)
+    bits = jnp.abs(matrix).view(np.dtype(f"u{matrix.dtype.itemsize}"))
+    subnormal = bits < (1 << info.nmant)
+    _, exponent = jnp.frexp(jnp.max(jnp.abs(matrix)))
+    # A subnormal matrix has no normal exponent on a flush-to-zero backend.
+    exponent = jnp.where(jnp.all(subnormal) & jnp.any(bits != 0), info.minexp, exponent)
+    half_exponent = exponent // 2
+    unit = jnp.ldexp(matrix, -2 * half_exponent)
+    # Recover subnormal entries from their integer counts of the smallest unit.
+    units = jnp.copysign(bits.astype(matrix.dtype), matrix)
+    restored = jnp.ldexp(units, info.minexp - info.nmant - 2 * half_exponent)
+    correction = jnp.where(subnormal, restored - unit, 0)
+    return unit + jax.lax.stop_gradient(correction), half_exponent
 
 
 def _psd_sqrt(matrix):
@@ -107,36 +162,90 @@ def _psd_sqrt(matrix):
     Returns:
         An ``(m, m)`` array ``A`` with ``A A^T`` equal to ``matrix``.
     """
-    eigvals, eigvecs = jnp.linalg.eigh(matrix)
-    return eigvecs * jnp.sqrt(jnp.maximum(eigvals, 0.0))
+    # Scale before the eigensolver symmetrizes the input or forms its norms.
+    unit, exponent = _scale_covariance(matrix)
+    eigvals, eigvecs = jnp.linalg.eigh(unit)
+    return jnp.ldexp(eigvecs * jnp.sqrt(jnp.maximum(eigvals, 0.0)), exponent)
+
+
+def _covariance_admissible(unit):
+    """Check a normalized covariance on the shared decision grid.
+
+    Args:
+        unit: Power-of-two-scaled float32 matrix.
+
+    Returns:
+        Boolean scalar for symmetry and positive-semidefinite admission.
+    """
+    tolerance = eps(COARSEST) * jnp.max(jnp.abs(unit))
+    delta = jnp.abs(unit - unit.T)
+    # At a rounded tie, try the equivalent difference with the tolerance
+    # first. Within a factor of two, Sterbenz's lemma makes it exact.
+    # Outside that range the original difference cannot round a violation
+    # down to the boundary.
+    larger = jnp.maximum(jnp.abs(unit), jnp.abs(unit.T))
+    opposite_sign = jnp.signbit(unit) != jnp.signbit(unit.T)
+    smaller = jnp.minimum(jnp.abs(unit), jnp.abs(unit.T))
+    signed_smaller = jnp.where(opposite_sign, -smaller, smaller)
+    excess_at_tie = (
+        (larger >= tolerance / 2)
+        & (larger <= tolerance * 2)
+        & (larger - tolerance > signed_smaller)
+    )
+    symmetric = jnp.all((delta < tolerance) | ((delta == tolerance) & ~excess_at_tie))
+    eigvals = jnp.linalg.eigvalsh((unit + unit.T) / 2)
+    # Each row has m rounded entries: ||delta C||_2 <= m * eps * ||C||_2.
+    bound = unit.shape[0] * eps(COARSEST) * jnp.max(jnp.abs(eigvals))
+    return symmetric & (eigvals[0] >= -bound)
 
 
 def _check_covariance(covariance_nm2, name="covariance_nm2"):
-    """Validate a modal covariance and return it as a numpy array.
+    """Check symmetry and positive semidefiniteness relative to the matrix scale.
+
+    Host inputs are normalized before narrowing to the same decision grid
+    used by eager and traced arrays.
 
     Args:
-        covariance_nm2: Candidate ``(m, m)`` covariance.
-        name: Argument name to quote in the error messages.
+        covariance_nm2: Candidate real, finite ``(m, m)`` covariance.
+        name: Argument name to quote in the error message.
 
     Returns:
-        The validated covariance as a numpy array.
+        The covariance at its working precision.
 
     Raises:
-        ValueError: If it is not square, not symmetric, or has a materially
-            negative eigenvalue.
+        ValueError: If the matrix is empty, nonsquare, nonfinite, asymmetric,
+            or has a materially negative eigenvalue.
     """
-    covariance = np.asarray(covariance_nm2)
-    if covariance.ndim != 2 or covariance.shape[0] != covariance.shape[1]:
-        raise ValueError(f"{name} must be square (m, m), got {covariance.shape}")
-    if not np.allclose(covariance, covariance.T, atol=1e-10, rtol=1e-6):
-        raise ValueError(f"{name} must be symmetric")
-    eigvals = np.linalg.eigvalsh(covariance)
-    tol = 1e-8 * max(float(np.abs(eigvals).max()), 1.0)
-    if eigvals.min() < -tol:
+    dynamic = any(isinstance(x, jax.Array) for x in jax.tree.leaves(covariance_nm2))
+    xp = jnp if dynamic else np
+    values = xp.asarray(covariance_nm2)
+    if values.ndim != 2 or values.shape[0] != values.shape[1] or not values.size:
         raise ValueError(
-            f"{name} must be positive semidefinite; min eigenvalue {eigvals.min():.3e}"
+            f"{name} must be nonempty and square (m, m), got {values.shape}"
         )
-    return covariance
+    if xp.iscomplexobj(values):
+        raise ValueError(f"{name} must be real")
+    message = f"{name} must be finite, symmetric and positive semidefinite"
+    if dynamic:
+        values = jax.lax.stop_gradient(as_float_leaf(values))
+        finite = jnp.isfinite(values)
+        unit, _ = _scale_covariance(jnp.where(finite, values, 0))
+        valid = jnp.all(finite) & _covariance_admissible(unit.astype(COARSEST))
+        if is_traced(valid):
+            return eqx.error_if(as_float_leaf(covariance_nm2), ~valid, message)
+        if not valid:
+            raise ValueError(message)
+        return as_float_leaf(covariance_nm2)
+
+    values = np.asarray(values, dtype=np.float64)
+    if not np.all(np.isfinite(values)):
+        raise ValueError(message)
+    _, exponent = np.frexp(np.max(np.abs(values)))
+    unit = np.ldexp(values, -2 * (exponent // 2)).astype(COARSEST)
+    with jax.ensure_compile_time_eval():
+        if not _covariance_admissible(jnp.asarray(unit)):
+            raise ValueError(message)
+        return as_float_leaf(covariance_nm2)
 
 
 def _check_covariance_modes(covariance, n_modes, name):
@@ -282,6 +391,7 @@ def correlated_drift_field(
     _check_covariance_modes(covariance, response.G.shape[-3], "covariance_nm2")
 
     power = _line_powers(frequencies_hz, psd)
+    frequencies = _stored_frequencies(frequencies_hz)
     total = float(power.sum())
     n_eff = total**2 / float((power**2).sum())
     if n_eff < _NEFF_WARN:
@@ -299,7 +409,7 @@ def correlated_drift_field(
     return AnalyticSpeckleField(
         response,
         amplitudes=amplitudes,
-        frequencies_hz=jnp.asarray(frequencies_hz),
+        frequencies_hz=frequencies,
         phases=phases,
         epoch_d=epoch_d,
     )
@@ -362,12 +472,13 @@ def grouped_drift_field(
             )
         power = _line_powers(freqs, psd)
         weights = jnp.asarray(2.0 * power / float(power.sum()))
+        covariance = _check_covariance(covariance, f"group {i} covariance")
         amplitudes, phases = _draw_correlated_spectrum(
             covariance, jax.random.fold_in(key, i), weights
         )
         amplitude_blocks.append(amplitudes)
         phase_blocks.append(phases)
-        freq_blocks.append(jnp.broadcast_to(jnp.asarray(freqs), amplitudes.shape))
+        freq_blocks.append(np.broadcast_to(freqs, amplitudes.shape))
 
     amplitudes = jnp.concatenate(amplitude_blocks, axis=0)
     phases = jnp.concatenate(phase_blocks, axis=0)
@@ -377,15 +488,15 @@ def grouped_drift_field(
             f"{response.G.shape[0]}; G's mode axis must be the blocks concatenated "
             "in order"
         )
-    frequencies = jnp.concatenate(freq_blocks, axis=0)
+    frequencies = np.concatenate(freq_blocks, axis=0)
     # Collapse to the shared 1D grid when every block agrees, so a
     # single-timescale call is indistinguishable from correlated_drift_field.
-    if bool(jnp.all(frequencies == frequencies[:1])):
+    if np.all(frequencies == frequencies[:1]):
         frequencies = frequencies[0]
     return AnalyticSpeckleField(
         response,
         amplitudes=amplitudes,
-        frequencies_hz=frequencies,
+        frequencies_hz=_stored_frequencies(frequencies),
         phases=phases,
         epoch_d=epoch_d,
     )
@@ -452,10 +563,10 @@ def correlated_channel_fields(
     power = _line_powers(frequencies_hz, psd)
     weights = jnp.asarray(2.0 * power / float(power.sum()))
 
+    frequencies = _stored_frequencies(frequencies_hz)
     key_shared, key_locals = jax.random.split(key)
-    shared_amp, shared_phase = _draw_correlated_spectrum(
-        shared_covariance_nm2, key_shared, weights
-    )
+    shared = _check_covariance(shared_covariance_nm2, "shared covariance")
+    shared_amp, shared_phase = _draw_correlated_spectrum(shared, key_shared, weights)
 
     fields = {}
     for i, name in enumerate(mcl.names):
@@ -467,6 +578,9 @@ def correlated_channel_fields(
             g_local = jnp.asarray(g_local)
             _check_covariance_modes(
                 covariance_local, g_local.shape[-3], f"{name} local covariance"
+            )
+            covariance_local = _check_covariance(
+                covariance_local, f"{name} local covariance"
             )
             local_amp, local_phase = _draw_correlated_spectrum(
                 covariance_local, jax.random.fold_in(key_locals, i), weights
@@ -484,7 +598,7 @@ def correlated_channel_fields(
                 wavelength_law=mcl.kind,
             ),
             amplitudes=amplitudes,
-            frequencies_hz=jnp.asarray(frequencies_hz),
+            frequencies_hz=frequencies,
             phases=phases,
             epoch_d=epoch_d,
         )
@@ -501,33 +615,60 @@ class TabulatedSpeckleField(LinearSpeckleField):
     the clock origin), holding the endpoints outside the table.
     """
 
-    times_s: Array = eqx.field(converter=as_float_leaf)
-    eps_table: Array = eqx.field(converter=as_float_leaf)
+    _clock: _TableClock
+    eps_table: Array
+
+    def __init__(self, response, times_s, eps_table, *, epoch_d=0.0):
+        """Build a replay field on a clock local to the first table knot.
+
+        Args:
+            response: Monochromatic focal amplitudes and normalization.
+            times_s: Ascending knot times in seconds since the clock origin.
+            eps_table: Per-mode coefficients at each knot.
+            epoch_d: Scene days corresponding to zero elapsed seconds.
+        """
+        self.response = response
+        self.epoch_d = epoch_d
+        self.eps_table = as_float_leaf(eps_table)
+        self._clock = _TableClock(times_s, self.eps_table)
 
     def __check_init__(self):
-        """Require a nonempty ascending table with one column per mode."""
+        """Require one coefficient row per knot and one column per mode.
+
+        Raises:
+            ValueError: If the coefficient axes do not match the knots and modes.
+        """
         if self.eps_table.ndim != 2:
             raise ValueError("eps_table must be 2D (t, m)")
         n_times, n_modes = self.eps_table.shape
-        if n_times == 0 or self.times_s.shape != (n_times,):
+        if self._clock.offsets_s.shape != (n_times,):
             raise ValueError("times_s must match eps_table's nonempty time axis")
-        if not isinstance(self.times_s, jax.core.Tracer):
-            times = np.asarray(self.times_s)
-            if not np.all(np.isfinite(times)) or np.any(np.diff(times) <= 0):
-                raise ValueError("times_s must be finite and strictly increasing")
         if self.response.G.shape[0] != n_modes:
             raise ValueError(
                 f"G has {self.response.G.shape[0]} modes but eps_table has {n_modes}"
             )
 
-    def coefficients(self, *, elapsed_s):
-        """Interpolate at ``elapsed_s`` seconds since the clock origin.
+    @property
+    def times_s(self) -> Array:
+        """Return knot times in seconds since the clock origin.
 
-        Returns an array of shape ``time_shape + (n_modes,)``.
+        Returns:
+            Absolute knot coordinates at the stored working precision.
         """
-        t = jnp.asarray(elapsed_s, dtype=float)
+        return self._clock.times_s
+
+    def coefficients(self, *, elapsed_s):
+        """Interpolate the table and hold the endpoints outside its span.
+
+        Args:
+            elapsed_s: Seconds since the clock origin.
+
+        Returns:
+            An array of shape ``time_shape + (n_modes,)``.
+        """
+        t = self._clock.offset(elapsed_s)
         return jax.vmap(
-            lambda column: jnp.interp(t, self.times_s, column),
+            lambda column: jnp.interp(t, self._clock.offsets_s, column),
             in_axes=1,
             out_axes=-1,
         )(self.eps_table)
@@ -567,8 +708,24 @@ def ou_covariance(covariance_nm2, timescales_s):
     """
     covariance = _check_covariance(covariance_nm2)
     tau = _check_timescales(timescales_s, covariance.shape[0])
-    overlap = 2.0 * np.sqrt(np.outer(tau, tau)) / (tau[:, None] + tau[None, :])
-    return jnp.asarray(covariance_nm2) * jnp.asarray(overlap)
+    return _stationary_ou_covariance(covariance, tau)
+
+
+def _stationary_ou_covariance(covariance, tau):
+    """Apply the Lorentzian spectral overlap to the driving covariance.
+
+    Args:
+        covariance: Checked driving covariance in squared coefficient units.
+        tau: Validated per-mode decorrelation timescales in seconds.
+
+    Returns:
+        Stationary covariance at the working precision of the driven modes.
+    """
+    roots = np.sqrt(tau)
+    root_ratio = np.minimum(roots[:, None], roots) / np.maximum(roots[:, None], roots)
+    overlap = like(2.0 * root_ratio / (1.0 + root_ratio**2), covariance)
+    # Preserve subnormal entries at unit overlap even on a flush-to-zero backend.
+    return jnp.where(overlap == 1.0, covariance, covariance * overlap)
 
 
 def _ou_innovation(sigma, inverse_tau):
@@ -628,8 +785,8 @@ def ou_innovation_covariance(covariance_nm2, timescales_s, step_s):
     """
     covariance = _check_covariance(covariance_nm2)
     tau = _check_timescales(timescales_s, covariance.shape[0])
-    sigma = ou_covariance(covariance_nm2, tau)
-    return _ou_innovation(sigma, jnp.asarray(1.0 / tau))(jnp.asarray(step_s))
+    sigma = _stationary_ou_covariance(covariance, tau)
+    return _ou_innovation(sigma, like(1.0 / tau, sigma))(like(step_s, sigma))
 
 
 def ou_lag_covariance(covariance_nm2, timescales_s, lag_s):
@@ -662,9 +819,9 @@ def ou_lag_covariance(covariance_nm2, timescales_s, lag_s):
     """
     covariance = _check_covariance(covariance_nm2)
     tau = _check_timescales(timescales_s, covariance.shape[0])
-    sigma = ou_covariance(covariance_nm2, tau)
-    lag = jnp.asarray(lag_s)
-    decay = jnp.exp(-jnp.abs(lag) / jnp.asarray(tau))
+    sigma = _stationary_ou_covariance(covariance, tau)
+    lag = like(lag_s, sigma)
+    decay = jnp.exp(-jnp.abs(lag) / like(tau, sigma))
     return jnp.where(lag >= 0.0, sigma * decay[None, :], sigma * decay[:, None])
 
 
@@ -728,32 +885,28 @@ def ou_trajectory(covariance_nm2, timescales_s, *, key, times_s):
     tau = _check_timescales(timescales_s, n_modes)
     times = _check_times(times_s)
 
-    sigma = ou_covariance(covariance_nm2, tau)
-    inverse_tau = jnp.asarray(1.0 / tau)
-    noise = jax.random.normal(key, (times.size, n_modes))
+    sigma = _stationary_ou_covariance(covariance, tau)
+    inverse_tau = like(1.0 / tau, sigma)
+    noise = jax.random.normal(key, (times.size, n_modes), dtype=sigma.dtype)
     start = _psd_sqrt(sigma) @ noise[0]
     if times.size == 1:
         return start[None, :]
 
-    steps_s = jnp.asarray(np.diff(times))
+    # Reuse a factor only for identical host intervals. Near-uniform grids
+    # retain their actual gaps without a precision-dependent uniformity test.
+    gaps, indices = np.unique(np.diff(times), return_inverse=True)
+    steps_s = like(gaps, sigma)
+    indices = jnp.asarray(indices, dtype=jnp.int32)
+    decays = jnp.exp(-steps_s[:, None] * inverse_tau)
+    innovation = _ou_innovation(sigma, inverse_tau)
+    lowers = jax.vmap(lambda dt: _psd_sqrt(innovation(dt)))(steps_s)
 
     def advance(eps, xs):
-        decay, lower, z = xs
-        moved = decay * eps + lower @ z
+        index, z = xs
+        moved = decays[index] * eps + lowers[index] @ z
         return moved, moved
 
-    decays = jnp.exp(-steps_s[:, None] * inverse_tau)  # (t - 1, m)
-    innovation = _ou_innovation(sigma, inverse_tau)
-    if np.allclose(np.diff(times), np.diff(times)[0], rtol=1e-9, atol=0.0):
-        lower = _psd_sqrt(innovation(steps_s[0]))
-
-        def advance_uniform(eps, z):
-            return advance(eps, (decays[0], lower, z))
-
-        _, moved = jax.lax.scan(advance_uniform, start, noise[1:])
-    else:
-        lowers = jax.vmap(lambda dt: _psd_sqrt(innovation(dt)))(steps_s)
-        _, moved = jax.lax.scan(advance, start, (decays, lowers, noise[1:]))
+    _, moved = jax.lax.scan(advance, start, (indices, noise[1:]))
     return jnp.concatenate([start[None, :], moved], axis=0)
 
 
@@ -789,16 +942,28 @@ def random_walk_trajectory(diffusion_nm2_per_s, *, key, times_s, start_nm=None):
     diffusion = _check_covariance(diffusion_nm2_per_s, name="diffusion_nm2_per_s")
     n_modes = diffusion.shape[0]
     times = _check_times(times_s)
-    origin = jnp.zeros(n_modes) if start_nm is None else jnp.asarray(start_nm)
+    origin = (
+        jnp.zeros(n_modes, dtype=diffusion.dtype)
+        if start_nm is None
+        else like(start_nm, diffusion)
+    )
     if times.size == 1:
+        # Keep the checked diffusion in the traced result even without a draw.
+        origin = eqx.error_if(
+            origin, ~jnp.all(jnp.isfinite(diffusion)), "diffusion must be finite"
+        )
         return jnp.broadcast_to(origin, (1, n_modes))
 
-    factor = _psd_sqrt(jnp.asarray(diffusion_nm2_per_s))
-    steps_s = jnp.asarray(np.diff(times))
-    noise = jax.random.normal(key, (times.size - 1, n_modes))
+    factor = _psd_sqrt(diffusion)
+    steps_s = like(np.diff(times), diffusion)
+    noise = jax.random.normal(key, (times.size - 1, n_modes), dtype=diffusion.dtype)
     increments = jnp.sqrt(steps_s)[:, None] * (noise @ factor.T)
     walk = jnp.concatenate(
-        [jnp.zeros((1, n_modes)), jnp.cumsum(increments, axis=0)], axis=0
+        [
+            jnp.zeros((1, n_modes), dtype=diffusion.dtype),
+            jnp.cumsum(increments, axis=0),
+        ],
+        axis=0,
     )
     return walk + origin
 
@@ -839,7 +1004,7 @@ def creep_trajectory(rates_nm_per_s, *, times_s, key=None, rate_shape=None):
             set without a ``key``, or if it is not strictly positive.
     """
     times = _check_times(times_s)
-    rates = jnp.asarray(rates_nm_per_s, dtype=float)
+    rates = as_float_leaf(rates_nm_per_s)
     if rates.ndim != 1:
         raise ValueError(f"rates_nm_per_s must be 1D (m,), got {rates.shape}")
     if rate_shape is not None:
@@ -847,9 +1012,11 @@ def creep_trajectory(rates_nm_per_s, *, times_s, key=None, rate_shape=None):
             raise ValueError("rate_shape needs a key: the drawn rate is random")
         if not float(rate_shape) > 0.0:
             raise ValueError(f"rate_shape must be positive, got {rate_shape}")
-        gamma = jax.random.gamma(key, float(rate_shape), shape=rates.shape)
+        gamma = jax.random.gamma(
+            key, float(rate_shape), shape=rates.shape, dtype=rates.dtype
+        )
         rates = rates * gamma / float(rate_shape)
-    elapsed_s = jnp.asarray(times - times[0])
+    elapsed_s = like(times - times[0], rates)
     return elapsed_s[:, None] * rates
 
 

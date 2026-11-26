@@ -5,6 +5,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
+from hwoutils.numerics import eps, roundoff
 from optixstuff import FocalResponse
 from optixstuff.grids import Frame, Measure, PixelGrid
 
@@ -232,7 +233,9 @@ class TestPsdIsADensity:
         """On a uniform grid the interior widths are a constant that
         normalizes away, so a uniform-grid caller sees no reweighting except
         at the two extreme lines, which a trapezoid rule half-weights because
-        the band stops there rather than continuing.
+        the band stops there rather than continuing. Two rounded frequency
+        nodes determine each half-width. Compare with the host analytic
+        spacing using binary64 host epsilon at the largest frequency.
         """
         from tiptilt.speckle import _line_powers
 
@@ -240,9 +243,12 @@ class TestPsdIsADensity:
         psd = np.linspace(1.0, 0.1, 16)
         with_df = _line_powers(freqs, psd)
         ratio = with_df / psd
-        np.testing.assert_allclose(ratio[1:-1], ratio[8], rtol=1e-12)
-        for edge in (0, -1):
-            assert np.isclose(ratio[edge], 0.5 * ratio[8], rtol=1e-12)
+        spacing = (freqs[-1] - freqs[0]) / (freqs.size - 1)
+        expected = np.full_like(freqs, spacing)
+        expected[[0, -1]] *= 0.5
+        np.testing.assert_allclose(
+            ratio, expected, rtol=0, atol=2 * eps(freqs.dtype) * freqs[-1]
+        )
 
     def test_log_grid_lorentzian_decorrelates_on_schedule(self):
         """A Lorentzian PSD on a log grid must realize the OU kernel
@@ -446,7 +452,14 @@ class TestPhysicaloptixIntegration:
 
 
 def test_shared_law_matches_density_parent_formula(ingredients):
-    """Parent coherent density law; bound is 32 binary64 eps of peak."""
+    """Check coherent density against a host binary64 contraction.
+
+    Allow 16 roundings on the unsigned intensity for interpolation, two
+    complex-by-real modal products, their sum, modulus square and scaling.
+
+    Args:
+        ingredients: Synthetic tabulated drift and optical response.
+    """
     from optixstuff.speckle import LinearSpeckleField
 
     field = TabulatedSpeckleField(**ingredients)
@@ -455,14 +468,17 @@ def test_shared_law_matches_density_parent_formula(ingredients):
     assert type(field).broadened is LinearSpeckleField.broadened
     response = ingredients["response"]
     eps = np.array([0.7, -0.7])
-    de = np.einsum("m,myx->yx", eps, response.G)
-    nominal = np.asarray(response.e_nom)
+    gain = np.asarray(response.G, dtype=np.complex128)
+    de = np.einsum("m,myx->yx", eps, gain)
+    nominal = np.asarray(response.e_nom, dtype=np.complex128)
     parent = 2 * np.real(nominal.conj() * de) + abs(de) ** 2
-    parent *= response.grid.pixel_area / response.input_energy
+    normalization = response.grid.pixel_area / float(response.input_energy)
+    parent *= normalization
     image = field.realize(wavelength_nm=500.0, elapsed_s=7.0)
-    np.testing.assert_allclose(
-        image.data, parent, rtol=0, atol=32 * np.finfo(float).eps * np.max(abs(parent))
-    )
+    envelope = np.einsum("m,myx->yx", abs(eps), abs(gain))
+    scale = (2 * abs(nominal) + envelope) * envelope * normalization
+    bound = roundoff(scale, n_ops=16, dtype=image.data.dtype)
+    assert np.all(abs(np.asarray(image.data) - parent) <= bound)
     assert image.grid == field.grid
     assert image.measure == Measure.integral()
     assert image.quantity == "stellar_flux_fraction"
@@ -476,7 +492,11 @@ def test_tabulated_clock_origin_and_seconds(ingredients):
     Truth: the piecewise-linear table at elapsed seconds, written out; the
     values are dyadic, so the comparison is exact. The field sits at
     ``epoch_d = 100`` and must ignore it. The derivative between nodes is the
-    tabulated slope per second, to 8 float64 eps.
+    tabulated slope per second. The endpoint differences are exact and the
+    quotient rounds once in the derivative dtype.
+
+    Args:
+        ingredients: Synthetic tabulated drift and optical response.
     """
     field = TabulatedSpeckleField(**ingredients, epoch_d=100.0)
     elapsed = np.array([-1.0, 0.0, 5.0, 10.0, 15.0, 21.0])
@@ -486,7 +506,10 @@ def test_tabulated_clock_origin_and_seconds(ingredients):
     np.testing.assert_array_equal(field.coefficients(elapsed_s=elapsed), expected)
     derivative = jax.jacfwd(lambda t: field.coefficients(elapsed_s=t))(5.0)
     np.testing.assert_allclose(
-        derivative, np.array([0.1, -0.1]), rtol=8 * np.finfo(float).eps
+        derivative,
+        [0.1, -0.1],
+        rtol=0,
+        atol=float(roundoff(0.1, dtype=derivative.dtype)),
     )
 
 
@@ -526,6 +549,101 @@ def _hwo_sim(epoch_d):
         frequency_hz=rng.random(shape) * 1e-3,
         phase=rng.random(shape) * 2 * np.pi,
     )
+
+
+@pytest.mark.parametrize("build", [_tabulated, _hwo_sim], ids=["tabulated", "hwo_sim"])
+def test_subsecond_host_epoch_offset(build, precision):
+    """Fails if absolute days collapse before subtraction or drift time widens.
+
+    The dyadic day offset and its conversion to seconds are exact in binary64
+    and binary32. At day 60000 the absolute times coincide in binary32.
+    A one-day tangent gives exactly 86400 seconds on either clock.
+
+    Args:
+        build: Construct a speckle field anchored at the supplied epoch.
+        precision: Real dtype of the current test lane.
+    """
+    from hwoutils.constants import d2s
+    from hwoutils.leaves import canonical
+    from hwoutils.testing import assert_precision_closed
+
+    epoch = 60000.0
+    delta_d = 2.0**-18
+    field = canonical(build(epoch), precision="float32")
+    expected_s = delta_d * d2s
+    elapsed = field.elapsed_s(np.float64(epoch + delta_d))
+    np.testing.assert_array_equal(elapsed, expected_s)
+    coefficients = field.coefficients(elapsed_s=elapsed)
+    assert coefficients.dtype == np.float32
+    np.testing.assert_array_equal(
+        coefficients, field.coefficients(elapsed_s=np.float32(expected_s))
+    )
+    if precision == np.float64:
+        t32 = jnp.asarray(expected_s, dtype=jnp.float32)
+        assert_precision_closed(lambda f, t: f.coefficients(elapsed_s=t), field, t32)
+        _, from_days = jax.jvp(
+            lambda d: field.coefficients(elapsed_s=field.elapsed_s(d)),
+            (jnp.asarray(epoch + delta_d),),
+            (jnp.asarray(1.0),),
+        )
+        _, from_seconds = jax.jvp(
+            lambda t: field.coefficients(elapsed_s=t),
+            (t32,),
+            (jnp.asarray(d2s, dtype=t32.dtype),),
+        )
+        np.testing.assert_array_equal(from_days, from_seconds)
+
+
+@pytest.mark.parametrize("hwo_sim", [False, True])
+@pytest.mark.parametrize("host_knots", [False, True])
+def test_tabulated_time_is_conditioned_before_narrowing(hwo_sim, host_knots, precision):
+    """At 2**26 + 1 s the exact linear coefficient is one eighth.
+
+    The spacing, offset and interpolated values are dyadic and exact.
+    Host knots also resolve sub-ULP gaps before storage.
+
+    Args:
+        hwo_sim: Exercise the HWO-Sim reader instead of the linear response.
+        host_knots: Supply closely spaced host knots when true.
+        precision: Real floating dtype of the active test lane.
+    """
+    origin = 2.0**26
+    gap = 2.0 if host_knots else 8.0
+    knots = np.array([origin, origin + gap])
+    if not host_knots:
+        knots = jnp.asarray(knots, dtype=jnp.float32)
+    if hwo_sim:
+        field = HwoSimSpeckleField(
+            np.zeros((1, 1)),
+            np.ones((1, 1, 1)),
+            np.ones((1, 1), dtype=bool),
+            wavelengths_nm=[500.0],
+            grid=PixelGrid.focal(1, 0.25, Frame(500.0, 1.0, "circumscribed")),
+            contrast_to_flux_fraction=1.0,
+            drift_time_s=knots,
+            drift_coefficients=jnp.asarray([[[0.0]], [[1.0]]], dtype=jnp.float32),
+        )
+    else:
+        field = TabulatedSpeckleField(
+            _focal_response(np.zeros((1, 1)), np.ones((1, 1, 1))),
+            knots,
+            jnp.asarray([[0.0], [1.0]], dtype=jnp.float32),
+        )
+
+    def read(elapsed):
+        return field.coefficients(elapsed_s=elapsed)
+
+    elapsed = np.float64(origin + 1)
+    expected = 1.0 / gap
+    assert read(elapsed).item() == expected
+    assert jax.jit(lambda: read(np.float64(origin + 1)))().item() == expected
+    compiled = jax.jit(read)
+    if precision == np.float64:
+        query = jnp.asarray(elapsed, dtype=precision)
+        assert read(query).item() == expected
+        assert compiled(query).item() == expected
+    for elapsed, expected in ((origin - 8, 0.0), (origin + 8, 1.0)):
+        assert compiled(jnp.asarray(elapsed)).item() == expected
 
 
 @pytest.mark.parametrize(
@@ -585,7 +703,11 @@ def test_fields_run_on_their_own_clock(build, scale, precision):
 
 
 def test_density_normalization_number_is_unchanged():
-    """Density e=2, G=3, eps=.5 gives (6+2.25)*.04/5 = .066."""
+    """Density e=2, G=3, eps=.5 gives (6+2.25)*.04/5 = .066.
+
+    Allow eight operations for field scaling, modal and cross products,
+    modulus square, summation and normalization.
+    """
     grid = PixelGrid.regular(
         (1, 1), 0.2, "lod", frame=Frame(500.0, 1.0, "circumscribed")
     )
@@ -601,9 +723,8 @@ def test_density_normalization_number_is_unchanged():
         jnp.array([0.0, 10.0]),
         jnp.array([[0.0], [1.0]]),
     )
-    assert float(
-        field.realize(wavelength_nm=500.0, elapsed_s=5.0).data[0, 0]
-    ) == pytest.approx(0.066, rel=8 * np.finfo(float).eps)
+    value = field.realize(wavelength_nm=500.0, elapsed_s=5.0).data[0, 0]
+    assert abs(float(value) - 0.066) <= roundoff(0.066, n_ops=8, dtype=value.dtype)
 
 
 def test_line_powers_nonuniform_and_discrete_line():

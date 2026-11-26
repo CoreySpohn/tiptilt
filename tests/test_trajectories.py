@@ -8,10 +8,14 @@ is exact at every step size, and that exactness is what the deterministic tests
 below pin.
 """
 
+from decimal import Decimal, localcontext
+
 import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
+from hwoutils.numerics import roundoff
+from hwoutils.testing import assert_precision_closed
 from optixstuff import FocalResponse
 from optixstuff.grids import Frame, PixelGrid
 from physicaloptix.speckle import ou_exposure_neff
@@ -43,6 +47,71 @@ def _ensemble(builder, n_samples=N_ENS, seed=11):
     return np.asarray(jax.vmap(builder)(keys))
 
 
+@pytest.mark.parametrize("compiled", [False, True])
+def test_stationary_ou_preserves_positive_subnormal(compiled, precision):
+    """Unit spectral overlap preserves the exact covariance and scaled draw.
+
+    The sampled normal is reused in the reference. Its product with the
+    dyadic square root is exact at the working precision.
+
+    Args:
+        compiled: JIT the covariance and trajectory if true.
+        precision: Real floating dtype of the active test lane.
+    """
+    power = np.finfo(precision).minexp - 4
+    covariance = jnp.asarray([[2.0**power]], dtype=precision)
+    key = jax.random.key(0)
+
+    def read(matrix, key):
+        return ou_covariance(matrix, 1.0), ou_trajectory(
+            matrix, 1.0, key=key, times_s=[0.0]
+        )
+
+    evaluate = jax.jit(read) if compiled else read
+    stationary, trajectory = evaluate(covariance, key)
+    noise = jax.random.normal(key, (1, 1), dtype=precision)
+    np.testing.assert_array_equal(stationary, covariance)
+    np.testing.assert_array_equal(trajectory, np.asarray(noise) * 2.0 ** (power // 2))
+
+
+def _innovation(covariance, clock):
+    return ou_innovation_covariance(covariance, [1.0, 2.0], clock)
+
+
+def _lag(covariance, clock):
+    return ou_lag_covariance(covariance, [1.0, 2.0], clock)
+
+
+def _ou_draw(covariance, key):
+    return ou_trajectory(covariance, [1.0, 2.0], key=key, times_s=[0.0, 0.5, 1.0])
+
+
+def _walk_draw(diffusion, key):
+    return random_walk_trajectory(
+        diffusion, key=key, times_s=[0.0, 0.5, 1.0], start_nm=np.array([1.0, 2.0])
+    )
+
+
+@pytest.mark.parametrize("evaluate", [_innovation, _lag, _ou_draw, _walk_draw])
+def test_drift_generators_follow_float32_owner(evaluate):
+    """Reject accidental width promotion in values and the whole traced graph.
+
+    Args:
+        evaluate: Public drift operation with a covariance or diffusion owner.
+    """
+    # Audit an explicitly narrow owner with a backend that can widen it.
+    with jax.enable_x64():
+        owner = jnp.eye(2, dtype=jnp.float32)
+        arg = (
+            jnp.asarray(0.5, dtype=jnp.float32)
+            if evaluate in (_innovation, _lag)
+            else jax.random.key(0)
+        )
+        assert evaluate(owner, arg).dtype == np.float32
+        assert jax.jit(evaluate)(owner, arg).dtype == np.float32
+        assert_precision_closed(evaluate, owner, arg)
+
+
 class TestOUCovariance:
     """The realized equal-time covariance, in closed form."""
 
@@ -65,12 +134,16 @@ class TestOUCovariance:
     def test_cross_terms_are_damped_by_the_spectral_overlap(self):
         """Modes that decorrelate on different schedules cannot be perfectly
         correlated: the off-diagonal carries the Lorentzian overlap factor
-        ``2 sqrt(tau_k tau_l) / (tau_k + tau_l)``."""
+        ``2 sqrt(tau_k tau_l) / (tau_k + tau_l)``. The host double overlap
+        rounds once when stored. Multiplication by unit covariance is exact.
+        """
         covariance = jnp.asarray([[1.0, 1.0], [1.0, 1.0]])  # perfectly correlated
         timescales = jnp.asarray([10.0, 1000.0])
         realized = np.asarray(ou_covariance(covariance, timescales))
         overlap = 2.0 * np.sqrt(10.0 * 1000.0) / 1010.0
-        assert realized[0, 1] == pytest.approx(overlap, rel=1e-12)
+        assert abs(float(realized[0, 1]) - overlap) <= roundoff(
+            overlap, dtype=realized.dtype
+        )
         assert realized[0, 1] < 1.0
 
     def test_stays_positive_semidefinite(self):
@@ -282,6 +355,32 @@ class TestOUTrajectory:
             rho = (traj[:, 0, :] * traj[:, -1, :]).mean(axis=0) / sigma
             np.testing.assert_allclose(rho, expected, atol=RHO_ATOL)
 
+    def test_nearly_uniform_grid_uses_each_host_interval(self):
+        """Replay two scalar OU steps against the host binary64 recurrence.
+
+        The second grid perturbation vanishes in float32. Both paths use the
+        same seeded standard normals. Ten operations per step cover decay,
+        innovation variance, square root, products and the accumulated sum.
+        """
+        key = jax.random.PRNGKey(17)
+        covariance = np.ones((1, 1))
+        for end in (2.0, 2.0 + 2**-32):
+            times = np.array([0.0, 1.0, end])
+
+            def draw(key, times=times):
+                return ou_trajectory(covariance, 1.0, key=key, times_s=times)
+
+            noise = np.asarray(jax.random.normal(key, (3, 1)), dtype=np.float64).ravel()
+            expected = [noise[0]]
+            for dt, z in zip(np.diff(times), noise[1:], strict=True):
+                moved = np.exp(-dt) * expected[-1] + np.sqrt(-np.expm1(-2 * dt)) * z
+                expected.append(moved)
+            for trajectory in (draw(key), jax.jit(draw)(key)):
+                bound = roundoff(np.sum(abs(noise)), n_ops=20, dtype=trajectory.dtype)
+                np.testing.assert_allclose(
+                    trajectory[:, 0], expected, rtol=0, atol=float(bound)
+                )
+
     def test_non_uniform_grid_honors_every_gap(self):
         times = jnp.asarray([0.0, 10.0, 500.0, 520.0, 3000.0])
         traj = _ensemble(self._build(times))
@@ -302,6 +401,10 @@ class TestOUTrajectory:
         covariance is the singular target itself and the degenerate direction
         is exercised end to end. (With per-mode timescales the Hadamard damping
         would pull a singular input back to full rank.)
+
+        The determinant is the product of the two sample eigenvalues. A
+        two-mode symmetric factorization perturbs its null variance by
+        order 2 eps times the spectral norm, so compare in variance squared.
         """
         v = jnp.asarray([1.0, 2.0])
         singular = jnp.outer(v, v)
@@ -313,7 +416,10 @@ class TestOUTrajectory:
         )
         measured = np.cov(traj[:, -1, :].T)
         np.testing.assert_allclose(measured, np.asarray(singular), rtol=0.09)
-        assert abs(np.linalg.det(measured)) < 1e-8
+        scale = np.linalg.norm(measured, ord=2) ** 2
+        assert abs(np.linalg.det(measured)) <= roundoff(
+            scale, n_ops=2, dtype=traj.dtype
+        )
 
     def test_zero_covariance_is_exactly_zero(self):
         table = ou_trajectory(
@@ -593,12 +699,24 @@ class TestOUExposureNeff:
         )
 
     def test_matches_the_closed_form(self):
+        """Use a decimal reference to avoid cancellation in the oracle.
+
+        In the direct form, an absolute expm1 error of eps*|expm1(-u)|
+        is divided by u+expm1(-u). Seven more roundings cover the ratio,
+        sum, products and quotient. The short-exposure test separately
+        checks the accuracy of the increment above one.
+        """
         tau = 500.0
         for fraction in (0.01, 0.5, 1.0, 10.0, 100.0):
-            u = fraction
-            expected = u**2 / (2.0 * (u - 1.0 + np.exp(-u)))
-            got = float(np.asarray(ou_exposure_neff(tau, fraction * tau))[0])
-            assert got == pytest.approx(expected, rel=1e-10)
+            with localcontext() as context:
+                context.prec = 50
+                u = Decimal(str(fraction))
+                expected = float(u**2 / (2 * (u - 1 + (-u).exp())))
+            got = np.asarray(ou_exposure_neff(tau, fraction * tau))[0]
+            denominator = fraction**2 / (2 * expected)
+            condition = abs(np.expm1(-fraction)) / denominator
+            bound = roundoff(expected * (7 + condition), dtype=got.dtype)
+            assert abs(float(got) - expected) <= bound
 
     def test_long_exposure_approaches_half_the_timescale_ratio(self):
         tau = 200.0
@@ -646,13 +764,26 @@ class TestOUExposureNeff:
         assert jnp.isfinite(jax.grad(total)(100.0))
         assert jnp.isfinite(jax.grad(total)(0.0))
 
-    def test_small_exposures_keep_their_precision(self):
-        """Below u ~ 1e-4 the direct form cancels to noise; the series branch
-        holds the exact N_eff - 1 = u/3 behavior down to u = 1e-12."""
-        tau = 1.0
-        for u in (1e-12, 1e-9, 1e-6, 1e-4, 1e-3):
-            got = float(np.asarray(ou_exposure_neff(tau, u))[0])
-            assert got - 1.0 == pytest.approx(u / 3.0, rel=1e-3)
+    @pytest.mark.parametrize("compiled", [False, True])
+    def test_small_exposures_keep_their_precision(self, compiled):
+        """Check the resolvable short-exposure increment against u/3.
+
+        The first omitted term is u**2/36. For u <= 0.001, u**2/30
+        bounds the remainder. Two roundings at one cover the reduction
+        and reciprocal, including increments smaller than a storage ULP.
+
+        Args:
+            compiled: Compile the sample-count evaluator if true.
+        """
+
+        def count(exposure):
+            return ou_exposure_neff(1.0, exposure)
+
+        evaluate = jax.jit(count) if compiled else count
+        for u in (1e-12, 1e-9, 1e-6, 2.0**-13, 1e-4, 1e-3):
+            got = np.asarray(evaluate(u))[0]
+            bound = u**2 / 30 + float(roundoff(1.0, n_ops=2, dtype=got.dtype))
+            assert abs((float(got) - 1.0) - u / 3.0) <= bound
 
     def test_the_two_branches_agree_at_the_crossover(self):
         tau = 1.0
@@ -668,12 +799,18 @@ class TestOUInnovationCovariance:
     TAU = jnp.asarray([50.0, 500.0])
 
     def test_equals_sigma_minus_decayed_sigma(self):
+        """Use host double decay and bound seven operations on the sigma scale.
+
+        The two inverse rates, sum, step scaling, exponential, covariance
+        product and storage can each round. Using sigma covers cancellation.
+        """
         step = 120.0
         sigma = np.asarray(ou_covariance(self.COV, self.TAU))
-        decay = np.exp(-step / np.asarray(self.TAU))
+        decay = np.exp(-step / np.asarray(self.TAU, dtype=np.float64))
         expected = sigma - np.diag(decay) @ sigma @ np.diag(decay)
         got = np.asarray(ou_innovation_covariance(self.COV, self.TAU, step))
-        np.testing.assert_allclose(got, expected, rtol=1e-12)
+        bound = roundoff(abs(sigma), n_ops=7, dtype=got.dtype)
+        assert np.all(abs(got - expected) <= bound)
 
     def test_a_vanishing_step_predicts_everything(self):
         got = np.asarray(ou_innovation_covariance(self.COV, self.TAU, 0.0))
@@ -753,18 +890,25 @@ class TestExposureAveragingOnARealField:
         )
 
     def test_matches_the_hand_averaged_midpoints(self):
+        """Four samples have at most three additions in either summation order.
+
+        Compare their means on the unsigned sample scale. Division by four
+        is exact and cannot obscure cancellation between midpoints.
+        """
         times = jnp.asarray(np.linspace(0.0, 400.0, 41))
         eps = ou_trajectory(jnp.eye(2), 60.0, key=jax.random.PRNGKey(0), times_s=times)
         field = self._field(times, eps)
         got = field.realize_average(wavelength_nm=600.0, exposure_s=100.0, n_sub=4).data
-        expected = (
-            sum(
+        samples = np.array(
+            [
                 field.realize(wavelength_nm=600.0, elapsed_s=t).data
                 for t in (12.5, 37.5, 62.5, 87.5)
-            )
-            / 4.0
+            ],
+            dtype=np.float64,
         )
-        np.testing.assert_allclose(np.asarray(got), np.asarray(expected), rtol=1e-12)
+        expected = samples.mean(axis=0)
+        bound = roundoff(abs(samples).mean(axis=0), n_ops=3, dtype=got.dtype)
+        assert np.all(abs(np.asarray(got) - expected) <= bound)
 
     def test_averaging_suppresses_the_fluctuation_it_should(self):
         """An exposure spanning many decorrelation times averages the speckle

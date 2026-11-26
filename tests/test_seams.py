@@ -312,8 +312,13 @@ def _z2():
 _LEAF_CASES = {
     "efc": (_efc, ["gain"]),
     "stroke": (
-        lambda cast: StrokeMinController.build(
-            _two_pixel_model([1.0, 1.0]), target_contrast=cast(1e-8), gain=cast(0.7)
+        lambda cast: StrokeMinController(
+            _z2(),
+            _z2(),
+            _two_pixel_model([1.0, 1.0]),
+            jnp.ones(1),
+            cast(1e-8),
+            cast(0.7),
         ),
         ["target_contrast", "gain"],
     ),
