@@ -47,6 +47,7 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 import numpy as np
+from hwoutils.interpolation import interp_linear
 from hwoutils.leaves import as_float_leaf, is_traced
 from hwoutils.numerics import COARSEST, eps
 from hwoutils.precision import like, require_float64
@@ -668,7 +669,7 @@ class TabulatedSpeckleField(LinearSpeckleField):
         """
         t = self._clock.offset(elapsed_s)
         return jax.vmap(
-            lambda column: jnp.interp(t, self._clock.offsets_s, column),
+            lambda column: interp_linear(t, self._clock.offsets_s, column),
             in_axes=1,
             out_axes=-1,
         )(self.eps_table)
