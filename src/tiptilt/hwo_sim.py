@@ -43,6 +43,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from astropy.io import fits
+from hwoutils.interpolation import interp_linear
 from hwoutils.leaves import as_bulk_leaf, as_float_leaf, is_traced
 from hwoutils.numerics import COARSEST, is_uniform
 from hwoutils.precision import like
@@ -533,10 +534,12 @@ class HwoSimSpeckleField(AbstractSpeckleField):
         t = self._clock.offset(elapsed_s)
         table = self.drift_coefficients
         flat = table.reshape(table.shape[0], -1)
-        # jnp.interp clamps outside the abscissa: a series covers a finite
-        # window and the wavefront outside it is unknown, so holding the
-        # endpoint is honest where extrapolating a thermal ramp would not be.
-        interp = jax.vmap(lambda column: jnp.interp(t, self._clock.offsets_s, column))
+        # Hold the endpoint outside the finite drift series: the wavefront
+        # there is unknown, and holding it is honest where extrapolating a
+        # thermal ramp would not be.
+        interp = jax.vmap(
+            lambda column: interp_linear(t, self._clock.offsets_s, column)
+        )
         return interp(flat.T).reshape(table.shape[1], table.shape[2])
 
     def spectral_breaks_nm(self) -> np.ndarray:
